@@ -250,7 +250,7 @@ class RemoteVMTests(unittest.TestCase):
                 boot_timeout=600, snapshot='/remote/snapshot', hcu_archive='/remote/hcu.zip',
                 cua_archive='/remote/candidate with spaces.zip',
                 guest_driver_config='/remote/driver config.json',
-                image='windows-image:1', network='isolated-network', timezone='Europe/London',
+                image='windows-image:1', network='isolated-network', timezone='Europe/London', capture_audio=True,
                 windows_timezone='GMT Standard Time', bridge_script='/remote/bridge.py',
                 activation_worker='/remote/worker.py', activation_revision='worker-version-2',
                 activation_server_dir=r'C:\Custom Server',
@@ -278,7 +278,7 @@ class RemoteVMTests(unittest.TestCase):
             worker_options = json.loads(worker_argv[worker_argv.index('--reset-options') + 1])
             self.assertEqual(worker_options['cua_archive'], args.cua_archive)
             self.assertEqual(worker_options['guest_driver_config'], args.guest_driver_config)
-            for field in ('image', 'network', 'timezone', 'windows_timezone', 'bridge_script',
+            for field in ('image', 'network', 'timezone', 'windows_timezone', 'bridge_script', 'capture_audio',
                           'activation_worker', 'activation_revision', 'activation_server_dir'):
                 self.assertEqual(worker_options[field], getattr(args, field))
             self.assertIn('cleanup_command', process.binding)

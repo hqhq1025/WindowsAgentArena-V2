@@ -207,7 +207,7 @@ def reset(args):
                'hcu_archive': args.hcu_archive, 'cua_archive': getattr(args, 'cua_archive', None),
                'guest_driver_config': getattr(args, 'guest_driver_config', None),
                'lock_network': args.lock_network}
-    for field in ('image', 'network', 'timezone', 'windows_timezone', 'bridge_script',
+    for field in ('image', 'network', 'timezone', 'windows_timezone', 'bridge_script', 'capture_audio',
                   'activation_worker', 'activation_revision', 'activation_server_dir'):
         if hasattr(args, field):
             options[field] = getattr(args, field)
@@ -269,6 +269,8 @@ def main():
     parser.add_argument('--network', help='Existing Docker network on the VM host')
     parser.add_argument('--timezone', default='UTC')
     parser.add_argument('--windows-timezone', default='UTC')
+    parser.add_argument('--capture-audio', action='store_true',
+                        help='Capture guest HDA playback to an episode WAV file; no live speaker or microphone')
     parser.add_argument('--arm', choices=['hcu', 'cua'], default='hcu')
     parser.add_argument('--snapshot')
     parser.add_argument('--hcu-archive')

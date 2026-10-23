@@ -18,6 +18,11 @@ import urllib.request
 
 ROOT = Path(os.environ.get('WAA_ROOT', str(Path.home() / '.local/share/waa-v2')))
 REPO = Path(__file__).resolve().parents[1]
+AUDIO_CAPTURE_ARGS = (
+    '-audiodev', 'none,id=waa-audio,out.frequency=44100,out.channels=2,out.format=s16',
+    '-device', 'ich9-intel-hda,id=waa-hda',
+    '-device', 'hda-output,bus=waa-hda.0,audiodev=waa-audio',
+)
 # The supported container uses legacy IPv4 and nft IPv6 filter tables.
 # Both firewall commands run in the container network namespace.
 NETWORK_LOCK = r'''#!/usr/bin/env bash
@@ -329,6 +334,13 @@ def stop_binding(binding):
     container_id = container['Id']
     if not isinstance(container_id, str) or not re.fullmatch(r'[0-9a-f]{64}', container_id):
         raise RuntimeError('Docker inspect did not return a full container ID')
+    audio_error = None
+    if binding.get('audio_capture', {}).get('started'):
+        try:
+            stop_audio_capture(binding, container_id)
+        except Exception as exc:
+            # Failed recording must remain visible, but cannot leak an owned VM.
+            audio_error = cleanup_error_text(exc)
     try:
         command(['docker', 'stop', '--time', '120', container_id], timeout=150)
         command(['docker', 'rm', container_id])
@@ -342,9 +354,48 @@ def stop_binding(binding):
             raise exc
         if not absent:
             raise
-        return {'status': 'already_absent', 'container': name,
-                'command_error': cleanup_error_text(exc)}
-    return {'status': 'stopped', 'container': name, 'storage_preserved': binding['storage']}
+        result = {'status': 'already_absent', 'container': name,
+                  'command_error': cleanup_error_text(exc)}
+    else:
+        result = {'status': 'stopped', 'container': name, 'storage_preserved': binding['storage']}
+    if audio_error is not None:
+        result['audio_capture_error'] = audio_error
+    return result
+
+
+def audio_monitor(binding, commands, container_id=None):
+    # A recycled IP/name must never redirect capture mutations to another VM.
+    container_id = container_id or binding['container_id']
+    if not re.fullmatch(r'[0-9a-f]{64}', container_id):
+        raise RuntimeError('Audio capture requires the owned Docker object ID')
+    script = Path(__file__).with_name('qmp_audio.py').read_text()
+    return json.loads(command(['docker', 'exec', container_id, 'python3', '-c', script,
+                               json.dumps(commands)], timeout=25))
+
+
+def capture_index(info):
+    match = re.fullmatch(r'\[(\d+)\]: Capturing audio\(44100,16,2\) to /waa-audio/playback\.wav: \d+ bytes\s*', info)
+    if not match:
+        raise RuntimeError('QEMU did not report exactly the owned playback capture: ' + repr(info))
+    return int(match[1])
+
+
+def start_audio_capture(binding):
+    if audio_monitor(binding, ['info capture']) != ['']:
+        raise RuntimeError('Unexpected existing QEMU audio capture')
+    results = audio_monitor(binding, ['wavcapture /waa-audio/playback.wav waa-audio 44100 16 2', 'info capture'])
+    if results[0] != '':
+        raise RuntimeError('QEMU rejected playback capture: ' + repr(results[0]))
+    capture_index(results[1])
+    binding['audio_capture'].update(started=True, start_observation=results[1])
+
+
+def stop_audio_capture(binding, container_id=None):
+    index = capture_index(audio_monitor(binding, ['info capture'], container_id)[0])
+    results = audio_monitor(binding, [f'stopcapture {index}', 'info capture'], container_id)
+    if results != ['', '']:
+        raise RuntimeError('QEMU did not confirm playback capture termination: ' + repr(results))
+    binding['audio_capture'].update(started=False, monitor_stopped=True)
 
 
 def capture_and_stop(binding, directory):
@@ -412,7 +463,7 @@ def verify_guest_license(url):
     return products
 
 
-def verify_qemu(name, timezone='UTC'):
+def verify_qemu(name, timezone='UTC', capture_audio=False):
     code = r'''import json,pathlib
 found=[]
 for proc in pathlib.Path('/proc').iterdir():
@@ -434,10 +485,19 @@ print(json.dumps(found))
         raise RuntimeError('QEMU did not enable KVM')
     if '-rtc' not in argv or argv[argv.index('-rtc') + 1] != 'base=localtime' or observed['timezone'] != timezone:
         raise RuntimeError('QEMU RTC or timezone differs from the selected Windows baseline')
+    if capture_audio:
+        for option, value in zip(AUDIO_CAPTURE_ARGS[::2], AUDIO_CAPTURE_ARGS[1::2]):
+            if not any(left == option and right == value for left, right in zip(argv, argv[1:])):
+                raise RuntimeError('QEMU did not enable the selected playback capture device/backend')
+        observed['playback_capture_arguments_verified'] = True
     return observed
 
 
 def container_command(args, name, storage, directory):
+    qemu_arguments = '-qmp tcp:0.0.0.0:7200,server,nowait'
+    capture_audio = getattr(args, 'capture_audio', False)
+    if capture_audio:
+        qemu_arguments += ' ' + ' '.join(AUDIO_CAPTURE_ARGS)
     run = ['docker', 'run', '-d', '--name', name, '--label', 'waa.owner=waa-v2',
            '--label', 'waa.episode=' + directory.name, '--network', args.network,
            '--device=/dev/kvm', '--device=/dev/net/tun', '--cap-add=NET_ADMIN',
@@ -445,8 +505,16 @@ def container_command(args, name, storage, directory):
            '-e', 'RAM_SIZE=8G', '-e', 'CPU_CORES=8',
            '-e', 'HOST_PORTS=7200', '-e', 'HV=' + args.hyperv, '-e', 'KVM=Y',
            '-e', 'TZ=' + getattr(args, 'timezone', 'UTC'),
-           '-e', 'VERSION=win11x64-enterprise-eval', '-e', 'ARGUMENTS=-qmp tcp:0.0.0.0:7200,server,nowait',
+           '-e', 'VERSION=win11x64-enterprise-eval', '-e', 'ARGUMENTS=' + qemu_arguments,
            '-v', str(storage) + ':/storage']
+    if capture_audio:
+        audio_directory = directory / 'audio'
+        audio_directory.mkdir(mode=0o700)
+        # QEMU retains an existing file's owner instead of creating root-owned
+        # evidence that the operator cannot archive after container removal.
+        descriptor = os.open(audio_directory / 'playback.wav', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        os.close(descriptor)
+        run += ['-v', str(audio_directory) + ':/waa-audio']
     if args.lock_network:
         hook = directory / 'network-lock.sh'
         hook.write_text(NETWORK_LOCK)
@@ -482,6 +550,14 @@ def start(args):
     binding['activation_worker'] = str(args.activation_worker) if getattr(args, 'activation_worker', None) else None
     binding['activation_revision'] = getattr(args, 'activation_revision', None)
     binding['hyperv_enlightenments'] = args.hyperv
+    if getattr(args, 'capture_audio', False):
+        binding['audio_capture'] = {
+            'requested': True, 'device': 'ich9-intel-hda', 'codec': 'hda-output', 'backend': 'none',
+            'capture_method': 'qmp-hmp-wavcapture',
+            'capture_file': str(directory / 'audio/playback.wav'),
+            'sample_rate_hz': 44100, 'channels': 2, 'sample_format': 's16',
+            'real_time_speaker': False, 'microphone': False,
+        }
     binding['network_lock_requested'] = args.lock_network
     binding['initial_egress_blocked'] = False
     binding['cleanup_command'] = [sys.executable, str(Path(__file__).resolve()), 'stop', '--episode', str(directory / 'episode.json')]
@@ -498,7 +574,7 @@ def start(args):
         command(['cp', '-a', '--reflink=auto', '--sparse=always', str(snapshot) + '/.', str(storage)], timeout=900)
         run = container_command(args, name, storage, directory)
         attempted_run = True
-        command(run, timeout=180)
+        binding['container_id'] = command(run, timeout=180)
         ip = command(['docker', 'inspect', name, '--format', '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}'])
         binding.update(status='booting', vm_ip=ip, controller_url=f'http://{ip}:5000', bridge_url=f'http://{ip}:8765')
         save_binding(directory, binding)
@@ -519,7 +595,10 @@ def start(args):
         if args.lock_network:
             (directory / 'network-rules.txt').write_text(verify_network_lock(name))
             binding['initial_egress_blocked'] = True
-        binding['qemu_observed'] = verify_qemu(name, getattr(args, 'timezone', 'UTC'))
+        binding['qemu_observed'] = verify_qemu(name, getattr(args, 'timezone', 'UTC'),
+                                             getattr(args, 'capture_audio', False))
+        if getattr(args, 'capture_audio', False):
+            start_audio_capture(binding)
         binding['guest_clock'] = verify_guest_clock(binding['controller_url'], getattr(args, 'windows_timezone', 'UTC'))
         binding['guest_license'] = verify_guest_license(binding['controller_url'])
         print('Windows control server ready: ' + name, file=sys.stderr, flush=True)
@@ -584,6 +663,8 @@ def main():
     parser.add_argument('--windows-timezone', default='UTC', help='Expected Windows timezone ID')
     parser.add_argument('--boot-timeout', type=int, default=600)
     parser.add_argument('--hyperv', choices=['Y', 'N'], default='N')
+    parser.add_argument('--capture-audio', action='store_true',
+                        help='Expose HDA playback and capture PCM to episode/audio/playback.wav; no live speaker or microphone')
     parser.add_argument('--snapshot', type=Path)
     parser.add_argument('--hcu-archive', type=Path)
     parser.add_argument('--cua-archive', type=Path, help='Explicit upstream CUA Windows ZIP; installed without binary changes')
