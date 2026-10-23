@@ -135,6 +135,39 @@ backends. The script verifies those rules before and after bootstrap. It does
 not change the host firewall. Keep this flag unset when the task requires
 guest-initiated network access.
 
+## Optional playback capture
+
+`--capture-audio` adds an Intel HDA controller and an output-only codec to the
+guest. A QEMU monitor capture writes playback samples to `audio/playback.wav` under that episode's
+directory. The option is available in both local and remote reset commands;
+without it, the commands add no audio device, backend, or capture mount.
+
+This provides a guest playback endpoint and file capture. It does not provide
+a real-time speaker or a microphone. The capture records 44.1 kHz, stereo,
+16-bit signed PCM. A running VM can keep writing samples even during silence,
+at approximately 176,400 bytes per second, so retain the existing episode time
+limit and account for capture disk space.
+
+Each episode mounts its own `audio` directory at `/waa-audio`, separately from
+`storage`. The operator pre-creates the capture file with mode `0600` so it remains
+readable by that operator after QEMU exits. The episode binding records the requested device, backend, format,
+and capture path. Bootstrap verifies that the selected QEMU arguments are active;
+this alone does not establish that Windows bound a driver or played nonzero audio.
+
+The image must provide QEMU's `none`, `ich9-intel-hda`, `hda-output`, and monitor
+`wavcapture` support. A capture callback records the mixed output independently
+of hardware voice initialization. The `wav` backend can leave an empty file on
+Windows even when a monitor capture receives the played samples.
+
+The operator starts capture through QMP after the controller becomes ready.
+Cleanup stops that capture before stopping the VM, which finalizes the WAV header.
+Capture errors remain in cleanup metadata and do not prevent VM removal. A VM
+that exits before cleanup may leave an unfinished recording. Check guest devices
+and audio services when validating a new image. Use the returned cleanup command
+before inspecting the final WAV header and PCM samples. Archive the
+episode's `audio` directory with its other evidence; do not treat an empty or
+all-zero WAV as proof of successful playback.
+
 ## Validation
 
 Run the operator tests from the repository root:
