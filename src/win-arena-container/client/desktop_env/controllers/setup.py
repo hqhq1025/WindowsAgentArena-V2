@@ -345,12 +345,30 @@ class SetupController:
             'Content-Type': 'application/json'
         }
 
-        # send request to server to open file
+        # Only this exact handler response proves that no activation occurred.
+        missing = f"Window {window_name} not found (empty results)"
+        deadline = time.monotonic() + 30.0
         try:
-            response = requests.post(self.http_server + "/setup" + "/activate_window", headers=headers, data=payload)
-            self._check_response(response)
-            logger.info(f"activate window setup RESPONSE: {response}, {response.text}")
-            logger.info("Command executed successfully: %s", response.text)
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(f"Window readiness deadline exceeded: {window_name}")
+                response = requests.post(
+                    self.http_server + "/setup/activate_window", headers=headers, data=payload,
+                    timeout=min(5.0, remaining),
+                )
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise RuntimeError(
+                        f"Window readiness deadline exceeded: {window_name}; "
+                        f"last HTTP {response.status_code}: {response.text}"
+                    )
+                if response.status_code == 404 and response.text == missing:
+                    time.sleep(min(0.5, remaining))
+                    continue
+                self._check_response(response)
+                logger.info("Window activation response: %s", response.text)
+                break
         except requests.exceptions.RequestException as e:
             logger.error("An error occurred while trying to send the request: %s", e)
             raise

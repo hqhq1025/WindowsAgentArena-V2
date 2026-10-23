@@ -62,6 +62,60 @@ class SetupControllerTests(unittest.TestCase):
         with patch.object(setup.requests, 'post', return_value=response(text='Window activated')):
             self.controller._activate_window_setup('Document')
 
+    def test_window_readiness_retries_only_missing_window_then_ready(self):
+        missing = response(404, text='Window Document not found (empty results)')
+        ready = response(text='Window activated successfully')
+        with patch.object(setup.requests, 'post', side_effect=[missing, missing, ready]) as post:
+            self.controller._activate_window_setup('Document', strict=True, by_class=False)
+        self.assertEqual(post.call_count, 3)
+        for call in post.call_args_list:
+            self.assertEqual(json.loads(call.kwargs['data']),
+                             {'window_name': 'Document', 'strict': True, 'by_class': False})
+            self.assertGreater(call.kwargs['timeout'], 0)
+            self.assertLessEqual(call.kwargs['timeout'], 5)
+
+    def test_window_readiness_deadline_bounds_requests_and_stops_next_step(self):
+        clock = [0.0]
+        def advance(seconds):
+            clock[0] += seconds
+        def send(*args, **kwargs):
+            self.assertLessEqual(kwargs['timeout'], 30.0 - clock[0])
+            return response(404, text='Window Document not found (empty results)')
+        with patch.object(setup.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(setup.time, 'sleep', side_effect=advance), \
+             patch.object(setup.requests, 'post', side_effect=send) as post:
+            with self.assertRaisesRegex(RuntimeError, 'readiness deadline exceeded'):
+                self.controller.setup([
+                    {'type': 'activate_window', 'parameters': {'window_name': 'Document'}},
+                    {'type': 'launch', 'parameters': {'command': ['must-not-start']}},
+                ])
+        self.assertEqual(clock[0], 30)
+        self.assertEqual(post.call_count, 60)
+
+    def test_window_readiness_does_not_retry_other_errors_or_unknown_input(self):
+        outcomes = [response(404, text='Window Other not found (empty results)'),
+                    response(404, text='Window Document not found (strict mode).'),
+                    response(404, text='proxy not found'),
+                    response(400, text='Window Document not found (empty results)'),
+                    response(500, text='Window Document not found (empty results)'),
+                    requests.Timeout('unknown activation outcome')]
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome), patch.object(setup.requests, 'post', side_effect=[outcome]) as post:
+                with self.assertRaises(requests.RequestException):
+                    self.controller._activate_window_setup('Document')
+                self.assertEqual(post.call_count, 1)
+
+    def test_window_readiness_does_not_accept_response_after_deadline(self):
+        clock = [0.0]
+        def send(*args, **kwargs):
+            clock[0] = 31.0
+            return response(text='Window activated successfully')
+        with patch.object(setup.time, 'monotonic', side_effect=lambda: clock[0]), \
+             patch.object(setup.requests, 'post', side_effect=send) as post:
+            with self.assertRaisesRegex(RuntimeError, 'last HTTP 200'):
+                self.controller._activate_window_setup('Document')
+        self.assertEqual(post.call_count, 1)
+
     def test_upload_and_cached_download_propagate_http_errors(self):
         source = self.cache / 'input.txt'
         source.write_text('input')
