@@ -97,7 +97,7 @@ class DiagnosticsTest(unittest.TestCase):
             self.assertIn("status:OSError", writer.state["errors"])
             self.assertEqual((writer.directory / "stderr.log").read_bytes(), b"diagnostic")
 
-    def test_sessions_are_separate_and_start_failure_is_recorded(self):
+    def test_start_failure_is_recorded(self):
         with tempfile.TemporaryDirectory() as temp:
             bridge = Bridge({"arms": {"hcu": {"command": [str(Path(temp) / "missing-executable")]}}}, "secret-token", temp)
             with self.assertRaises(OSError):
@@ -108,6 +108,25 @@ class DiagnosticsTest(unittest.TestCase):
             state = json.loads(states[0].read_text())
             self.assertIn("start:FileNotFoundError", state["errors"])
             self.assertTrue(state["reader_done"])
+
+    def test_empty_session_logs_are_distinct_and_persist_after_stop(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "diagnostics"
+            command = [sys.executable, "-c", "import sys; sys.stdin.read()"]
+            bridge = Bridge({"arms": {"hcu": {"command": command}}}, "secret-token", root)
+            self.assertTrue(root.is_dir())
+            sessions = []
+            for _ in range(2):
+                session_id = bridge.dispatch("/session/start", {"arm": "hcu"})["session_id"]
+                sessions.append(session_id)
+                bridge.dispatch("/session/stop", {"session_id": session_id})
+            self.assertNotEqual(*sessions)
+            for session_id in sessions:
+                self.assertEqual((root / session_id / "stderr.log").read_bytes(), b"")
+                state = json.loads((root / session_id / "status.json").read_text())
+                self.assertEqual(state["received_bytes"], 0)
+                self.assertEqual(state["errors"], [])
+                self.assertTrue(state["session_closed"])
 
 
 if __name__ == "__main__":

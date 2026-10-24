@@ -28,9 +28,9 @@ secrets can remain in trusted driver output; operator access restrictions still 
 An abrupt bridge exit can leave status incomplete. Capacity limits preserve the
 prefix, so later diagnostics can be discarded and are marked as truncated.
 
-Validation: 27 tests ran, with 21 passing and six PowerShell tests skipped because
-no PowerShell executable was selected. After narrowing redaction to credential
-environment names, all six diagnostic tests passed again.
+Validation: all 28 bridge tests passed. PowerShell text tests used the existing
+PowerShell 7.6.7 Linux executable, so no tests were skipped. The seven diagnostic
+tests include distinct empty sessions and a root created before the first session.
 Tests use a real local fake-driver subprocess for normal stop, timeout,
 oversized output without newlines, and environment credential redaction.
 Unit tests cover all split points in a secret, failed writes, failed status updates,

@@ -521,6 +521,8 @@ class Bridge:
             raise ValueError("Bridge token must be non-empty")
         self.token = token
         self.diagnostics_dir = Path(diagnostics_dir) if diagnostics_dir is not None else None
+        if self.diagnostics_dir is not None:
+            self.diagnostics_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.arms = config["arms"]
         for arm in self.arms.values():
             command = arm.get("command")
