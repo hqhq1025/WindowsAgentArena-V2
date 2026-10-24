@@ -101,9 +101,22 @@ They cover reopening before save, existing windows, absent files, open failures,
 unknown activation failures, deadline accounting, opt-in validation, and the full selected configuration set.
 A semantic comparison against the prerequisite branch confirms that the 141 task documents differ
 only by the 38 evaluator activation parameters. Existing setup and task Python syntax checks also pass.
-These tests mock the guest endpoints and do not establish Windows application behavior.
-A separate Windows save-close-reopen regression must complete before runtime promotion.
-Frozen runs and their recorded scores must not be changed by this repair.
+These host tests mock the guest endpoints.
+
+A separate Windows regression passed on 2026-10-24 with source reference `62e3295`:
+`waa-postconfig-neutral-reopen-20261024-a1` used a new synthetic XLSX document.
+The original save sequence persisted a GUI edit that was previously absent from the file.
+After closing the document, the activation endpoint returned the exact missing-window HTTP 404.
+The new sequence opened the declared file once, confirmed strict activation, and saved it.
+File inspection confirmed that the edited cell and an untouched sentinel cell survived.
+The reopening screenshot also showed those values in Calc.
+An absent-file case returned HTTP 404 from opening and never reached the save command.
+The regression closed its document afterward and confirmed the final missing-window response.
+
+The evidence directory for this attempt contains `report.json`, `controller.log`, `canary.py`,
+and closed, reopened, and released screenshots. This test used no reference answers or task metrics.
+It validates the mechanism in Calc; it does not establish a task score or a Writer application regression.
+Keep frozen runs and their recorded scores unchanged.
 
 ```sh
 python -m unittest discover -s tests -v
