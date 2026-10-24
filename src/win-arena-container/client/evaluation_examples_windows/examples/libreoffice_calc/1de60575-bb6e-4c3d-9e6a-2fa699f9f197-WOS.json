@@ -57,6 +57,13 @@
 				"parameters": {
 					"seconds": 3.0
 				}
+			},
+			{
+				"type": "activate_window",
+				"parameters": {
+					"window_name": "EntireSummerSales.xlsx — LibreOffice Calc",
+					"strict": true
+				}
 			}
 		],
 		"func": "compare_table",

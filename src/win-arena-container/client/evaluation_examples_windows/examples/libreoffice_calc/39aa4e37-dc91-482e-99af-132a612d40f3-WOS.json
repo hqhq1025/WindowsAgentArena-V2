@@ -51,6 +51,13 @@
                         "import pyautogui; pyautogui.hotkey('ctrl', 's');"
                     ]
                 }
+            },
+            {
+                "type": "activate_window",
+                "parameters": {
+                    "window_name": "LARS_Science_Assessment_Resource_List_7-30-21.xlsx — LibreOffice Calc",
+                    "strict": true
+                }
             }
         ],
         "func": "compare_table",
