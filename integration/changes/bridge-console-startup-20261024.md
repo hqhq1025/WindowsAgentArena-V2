@@ -27,13 +27,13 @@ do not change because the public transport contract remains unchanged.
 
 The diagnostic foreground title matching `computer-use.exe` supports a possible
 console interference mechanism. This code audit does not prove that every
-historical formal run lost foreground focus. Windows native console tests and
-a fresh GUI fixture canary must distinguish console allocation from foreground
-transitions. Linux subprocess tests cannot validate Windows console behavior.
+historical formal run lost foreground focus. Native Windows tests inspect
+console allocation, successful startup, and cleanup. Foreground stability is
+not an admission requirement. Linux tests cannot validate Windows console behavior.
 
 Validation: 31 bridge tests completed on Linux, with 29 passing and two native
 Windows tests skipped. Six shell tests used the existing PowerShell 7.6.7 Linux
 runtime. The checks cover runtime identity, errors, output limits, cancellation,
 stdio, and successful child survival. An independent code review found no issue.
-Native Windows console and foreground evidence remain required before admission.
+Native Windows console, startup, and cleanup evidence remain required before admission.
 Current frozen packages, running bridges, and VMs remain unchanged.
