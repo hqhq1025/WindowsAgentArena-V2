@@ -71,6 +71,39 @@ python3 integration/vm.py stop --episode /srv/waa-state/vms/EPISODE/episode.json
 The writable storage copy and operator evidence remain after cleanup. Archive
 them separately according to the operator's retention policy.
 
+### Driver diagnostics before shutdown
+
+Use the bridge candidate `bridge-stderr-diagnostics-20261024` from the stacked
+logger PR, based on upstream PR #5. Its default directory is
+`C:\waa-bridge\driver-diagnostics`. The lifecycle exporter depends on that
+per-session log and status format. It does not install or start the logger itself.
+
+Stop the MCP session before the VM cleanup command. Cleanup reads only UUIDv4
+session directories and the `stderr.log` and `status.json` files inside them.
+It rejects redirected paths, oversized files, and incomplete session status.
+Each attempt writes a new `driver-diagnostic-captures/<attempt UUID>/` directory
+inside the episode metadata directory. Files receive an immediate byte-for-byte
+readback check. The existing metadata archiver then copies these files to the host.
+
+The exporter uses a 30-second request budget and accepts at most 64 sessions.
+A missing directory differs from a confirmed directory with no sessions.
+An empty log differs from failed capture. The receipt preserves log truncation
+and capture errors, even when all existing files were exported.
+`export_complete` means all available closed-session files were copied.
+`diagnostics_complete` additionally requires no capture errors or truncation.
+
+An incomplete export sets `storage_reclamation_blocked=true`. Cleanup still stops
+the owned container and preserves its writable storage. The local and remote
+cleanup commands save this state and return failure. Do not delete that storage
+until the missing diagnostics are recovered or an operator explicitly retires
+the evidence. A repeated cleanup after VM removal can reuse a complete prior
+receipt whose declared local files still exist. It cannot replace success with
+a failed attempt, or turn a previous failure into successful archival.
+
+The exporter does not expose diagnostics to the evaluated model. It does not read
+task instructions, images, driver configuration, or credentials. Preserve the
+operator-only permissions of the episode directory and its archive.
+
 ## Remote VM host
 
 Configure SSH authentication before launching. Paths supplied as `--remote-root`,

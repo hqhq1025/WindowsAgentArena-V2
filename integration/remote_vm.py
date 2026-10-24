@@ -126,6 +126,7 @@ def cancel_worker(args):
         result = vm.capture_and_stop(binding, Path(binding['storage']).parent)
         vm.save_binding(Path(binding['storage']).parent, binding)
         save(progress, binding)
+        vm.require_diagnostic_export(binding)
     else:
         result = {'status': 'cancelled_before_container'}
     print(json.dumps(result), flush=True)
