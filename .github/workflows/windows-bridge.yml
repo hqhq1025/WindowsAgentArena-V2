@@ -1,0 +1,30 @@
+name: Windows bridge
+
+on:
+  pull_request:
+    paths:
+      - integration/guest_mcp_bridge.py
+      - integration/bridge_client.py
+      - integration/tests/**
+      - .github/workflows/windows-bridge.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check console allocation, stdio, and command cleanup
+        shell: pwsh
+        run: |
+          $env:PYTHONPATH = 'integration'
+          $env:WAA_TEST_PWSH = (Get-Command pwsh).Source
+          & $env:WAA_TEST_PWSH -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          python -m unittest discover -s integration/tests -v
