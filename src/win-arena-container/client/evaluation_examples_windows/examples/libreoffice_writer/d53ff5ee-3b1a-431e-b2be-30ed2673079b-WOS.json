@@ -34,7 +34,8 @@
         "type": "activate_window",
         "parameters": {
           "window_name": "presentation_instruction_2023_Feb.docx — LibreOffice Writer",
-          "strict": true
+          "strict": true,
+          "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\presentation_instruction_2023_Feb.docx"
         }
       },
       {

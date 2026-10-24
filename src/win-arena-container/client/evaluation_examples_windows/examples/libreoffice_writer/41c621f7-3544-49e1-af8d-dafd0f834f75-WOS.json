@@ -33,7 +33,8 @@
           "type": "activate_window",
           "parameters": {
             "window_name": "How_to_read_a_scientific_article.docx — LibreOffice Writer",
-            "strict": true
+            "strict": true,
+            "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\How_to_read_a_scientific_article.docx"
           }
         },
         {

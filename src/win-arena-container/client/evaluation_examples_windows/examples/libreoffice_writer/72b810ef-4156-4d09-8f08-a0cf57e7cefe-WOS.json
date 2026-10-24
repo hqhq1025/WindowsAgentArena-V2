@@ -32,7 +32,8 @@
         "type": "activate_window",
         "parameters": {
           "window_name": "GEOG2169_Course_Outline_2022-23.docx — LibreOffice Writer",
-          "strict": true
+          "strict": true,
+          "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\GEOG2169_Course_Outline_2022-23.docx"
         }
       },
       {

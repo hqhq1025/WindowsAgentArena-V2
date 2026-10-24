@@ -38,7 +38,8 @@
 				"type": "activate_window",
 				"parameters": {
 					"window_name": "Employee_Age_By_Birthday.xlsx — LibreOffice Calc",
-					"strict": true
+					"strict": true,
+					"open_file_if_missing": "C:\\Users\\Docker\\Downloads\\Employee_Age_By_Birthday.xlsx"
 				}
 			},
 			{

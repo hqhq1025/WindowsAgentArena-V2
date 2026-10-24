@@ -336,9 +336,16 @@ class SetupController:
         # TODO
         raise NotImplementedError()
 
-    def _activate_window_setup(self, window_name: str, strict: bool = False, by_class: bool = False):
+    def _activate_window_setup(self, window_name: str, strict: bool = False, by_class: bool = False,
+                               open_file_if_missing: Optional[str] = None):
+        """Optionally reopen a declared saved file before strict window activation."""
         if not window_name:
             raise Exception(f"Setup Open - Invalid path ({window_name}).")
+        if open_file_if_missing is not None:
+            if not isinstance(open_file_if_missing, str) or not open_file_if_missing.strip():
+                raise ValueError("open_file_if_missing must be a nonempty file path")
+            if not strict or by_class:
+                raise ValueError("open_file_if_missing requires strict title activation")
 
         payload = json.dumps({"window_name": window_name, "strict": strict, "by_class": by_class})
         headers = {
@@ -348,6 +355,7 @@ class SetupController:
         # Only this exact handler response proves that no activation occurred.
         missing = f"Window {window_name} not found (empty results)"
         deadline = time.monotonic() + 30.0
+        opened = False
         try:
             while True:
                 remaining = deadline - time.monotonic()
@@ -364,6 +372,17 @@ class SetupController:
                         f"last HTTP {response.status_code}: {response.text}"
                     )
                 if response.status_code == 404 and response.text == missing:
+                    if open_file_if_missing is not None and not opened:
+                        # The guest rejects absent files. Opening is attempted once;
+                        # only subsequent activation confirms window readiness.
+                        opened = True
+                        response = requests.post(
+                            self.http_server + "/setup/open_file", headers=headers,
+                            data=json.dumps({"path": open_file_if_missing}), timeout=remaining,
+                        )
+                        self._check_response(response)
+                        logger.info("Reopened saved file for activation: %s", open_file_if_missing)
+                        continue
                     time.sleep(min(0.5, remaining))
                     continue
                 self._check_response(response)
