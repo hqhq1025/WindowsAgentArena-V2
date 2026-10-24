@@ -36,6 +36,13 @@ whose executable path is absolute. Optional `cwd` and `env` fields configure the
 MCP subprocess. The bridge never interprets the command array as a shell string.
 A caller-supplied command must exactly match the configured array.
 
+On Windows, the bridge starts its MCP server, PowerShell supervisor, and
+PowerShell process with `CREATE_NO_WINDOW`. Redirecting standard streams alone
+does not prevent a console window. Creation flags apply to each process launch;
+drivers remain responsible for their own background subprocesses. This setting
+does not suppress GUI applications that a task script intentionally launches.
+It does not change non-Windows process groups or Windows job ownership.
+
 The optional `powershell` object accepts `executable` and `expected_version`.
 Set `expected_version` to the installed runtime's exact version when version
 matching is required. The bridge checks executable identity and the configured

@@ -82,12 +82,14 @@ class Command:
         self.stderr = tempfile.TemporaryFile()
         self.job = None
         # The supervisor cannot launch the command until it belongs to its job.
-        supervisor = "import sys,subprocess; gate=sys.stdin.buffer.read(1); sys.exit(subprocess.call(sys.argv[1:],stdin=subprocess.DEVNULL) if gate==b'1' else 125)"
+        # Console creation flags apply to each child, not its descendants.
+        supervisor = "import os,sys,subprocess; gate=sys.stdin.buffer.read(1); sys.exit(subprocess.call(sys.argv[1:],stdin=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0) if gate==b'1' else 125)"
         try:
             self.job = WindowsJob() if os.name == "nt" else None
             self.process = subprocess.Popen([sys.executable, "-c", supervisor, *command],
                 stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr,
-                start_new_session=os.name != "nt", env=env)
+                start_new_session=os.name != "nt", env=env,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             if self.job:
                 self.job.attach(self.process)
             self.process.stdin.write(b"1")
@@ -251,6 +253,7 @@ class Session:
             env={**os.environ, **config.get("env", {})}, shell=False,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", bufsize=1,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
         self.lock = threading.Lock()
         self.write_lock = threading.Lock()
