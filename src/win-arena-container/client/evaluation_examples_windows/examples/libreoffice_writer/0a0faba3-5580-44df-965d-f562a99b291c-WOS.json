@@ -52,6 +52,13 @@
               "import pyautogui; import time; pyautogui.hotkey('ctrl', 's'); time.sleep(0.5); "
             ]
           }
+        },
+        {
+          "type": "activate_window",
+          "parameters": {
+            "window_name": "04 CHIN9505 EBook Purchasing info 2021 Jan.docx — LibreOffice Writer",
+            "strict": true
+          }
         }
       ],
       "func": "check_tabstops",

@@ -51,6 +51,13 @@
             "import pyautogui; import time; pyautogui.hotkey('ctrl', 's'); time.sleep(0.5); "
           ]
         }
+      },
+      {
+        "type": "activate_window",
+        "parameters": {
+          "window_name": "CCCH9003_Tutorial_guidelines.docx — LibreOffice Writer",
+          "strict": true
+        }
       }
     ],
     "func": "compare_docx_files",
