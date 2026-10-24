@@ -268,14 +268,29 @@ def save_binding(directory, binding):
         temporary.replace(target)
 
 
-def capture_container(name, directory):
+def capture_container(name, directory, *, binding=None):
     # Every cleanup attempt retains its own diagnostics. Failed recaptures after
     # removal must not overwrite the last usable pre-teardown evidence.
     capture = directory / 'container-captures' / f'{time.time_ns()}-{secrets.token_hex(4)}'
     capture.mkdir(parents=True, exist_ok=False)
-    metadata = {'container': name, 'files': {}}
-    for suffix, argv in [('container.log', ['docker', 'logs', '--tail', '500', name]),
-                         ('container-inspect.json', ['docker', 'inspect', name])]:
+    metadata = {'container': name, 'files': {}, 'capture_directory': str(capture.resolve())}
+    target_name = name
+    if binding is not None:
+        owned = inspect_container(name)
+        metadata['episode_id'] = binding['episode_id']
+        if owned is None:
+            metadata.update(complete=False, status='already_absent')
+            (capture / 'capture.json').write_text(json.dumps(metadata, indent=2) + '\n')
+            return metadata
+        labels = owned.get('Config', {}).get('Labels') or {}
+        target_name = owned.get('Id')
+        if (labels.get('waa.owner') != 'waa-v2' or labels.get('waa.episode') != binding['episode_id']
+                or not isinstance(target_name, str) or not re.fullmatch(r'[0-9a-f]{64}', target_name)
+                or binding.get('container_id', target_name) != target_name):
+            raise RuntimeError('Container evidence ownership does not match this episode')
+        metadata['container_id'] = target_name
+    for suffix, argv in [('container.log', ['docker', 'logs', '--tail', '500', target_name]),
+                         ('container-inspect.json', ['docker', 'inspect', target_name])]:
         try:
             result = subprocess.run(argv, capture_output=True, text=True, timeout=20)
             output = result.stdout + result.stderr
@@ -286,10 +301,35 @@ def capture_container(name, directory):
             metadata['files'][suffix] = {'error': f'{type(exc).__name__}: {exc}'}
             succeeded = False
         (capture / suffix).write_text(output)
+        metadata['files'][suffix]['bytes'] = (capture / suffix).stat().st_size
         target = directory / suffix
         if succeeded or not target.exists():
             target.write_text(output)
+    metadata['complete'] = all(entry.get('returncode') == 0 for entry in metadata['files'].values())
     (capture / 'capture.json').write_text(json.dumps(metadata, indent=2) + '\n')
+    return metadata
+
+
+def reusable_container_capture(report, binding, directory):
+    if not isinstance(report, dict) or report.get('complete') is not True:
+        return False
+    try:
+        if (report.get('episode_id') != binding['episode_id'] or report.get('container') != binding['container']
+                or not re.fullmatch(r'[0-9a-f]{64}', report.get('container_id', ''))
+                or binding.get('container_id', report['container_id']) != report['container_id']):
+            return False
+        capture = Path(report['capture_directory'])
+        if (capture.parent != Path(directory).resolve() / 'container-captures'
+                or not re.fullmatch(r'[0-9]+-[0-9a-f]{8}', capture.name) or capture.resolve() != capture
+                or json.loads((capture / 'capture.json').read_text()) != report):
+            return False
+        if set(report['files']) != {'container.log', 'container-inspect.json'}:
+            return False
+        return all((capture / name).resolve() == capture / name
+                   and (capture / name).stat().st_size == entry['bytes']
+                   for name, entry in report['files'].items())
+    except (OSError, ValueError, TypeError, KeyError):
+        return False
 
 
 def cleanup_error_text(exc):
@@ -389,14 +429,18 @@ def capture_driver_diagnostics(binding, directory):
                               container_id)
 
 
-def require_diagnostic_export(binding):
+def require_cleanup_evidence(binding):
     if binding.get('storage_reclamation_blocked'):
-        raise RuntimeError('Driver diagnostic export incomplete; preserve episode storage and inspect its capture receipt')
+        raise RuntimeError('Cleanup evidence incomplete; preserve episode storage and inspect capture receipts')
 
 
 def capture_and_stop(binding, directory):
     """Keep evidence failures visible without allowing them to block owned VM cleanup."""
     capture_error = None
+    capture_report = None
+    previous_capture = binding.get('container_capture')
+    previous_capture_error = binding.get('cleanup', {}).get('capture_error')
+    previous_audio_error = binding.get('cleanup', {}).get('audio_capture_error')
     try:
         diagnostics = capture_driver_diagnostics(binding, directory)
     except Exception as exc:
@@ -404,15 +448,35 @@ def capture_and_stop(binding, directory):
     binding['driver_diagnostics_export'] = diagnostics
     binding['storage_reclamation_blocked'] = not diagnostics['export_complete']
     try:
-        capture_container(binding['container'], directory)
+        capture_report = capture_container(binding['container'], directory, binding=binding)
+        if not isinstance(capture_report, dict) or capture_report.get('complete') is not True:
+            capture_error = 'Container evidence capture incomplete; inspect its capture.json'
     except Exception as exc:
         capture_error = f'{type(exc).__name__}: {exc}'
     try:
         cleanup = stop_binding(binding)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(cleanup_error_text(exc)) from exc
+    cleanup['container_capture_attempt'] = capture_report
+    if capture_error is not None:
+        cleanup['capture_attempt_error'] = capture_error
+    if capture_error is None:
+        binding['container_capture'] = capture_report
+    elif cleanup.get('status') == 'already_absent' and reusable_container_capture(previous_capture, binding, directory):
+        capture_error = None
+        cleanup['container_capture_reused'] = True
+    if previous_capture_error is not None:
+        cleanup['previous_capture_error'] = previous_capture_error
     if capture_error is not None:
         cleanup['capture_error'] = capture_error
+        binding['storage_reclamation_blocked'] = True
+    # An already-absent container cannot erase a prior recording failure.
+    if previous_audio_error is not None and 'audio_capture_error' not in cleanup:
+        cleanup['audio_capture_error'] = previous_audio_error
+    if binding.get('audio_capture', {}).get('started') and 'audio_capture_error' not in cleanup:
+        cleanup['audio_capture_error'] = 'Audio capture lacks confirmed monitor stop'
+    if 'audio_capture_error' in cleanup:
+        binding['storage_reclamation_blocked'] = True
     binding['cleanup'] = cleanup
     cleanup['driver_diagnostics_export'] = diagnostics
     cleanup['storage_reclamation_blocked'] = binding['storage_reclamation_blocked']
@@ -673,7 +737,7 @@ def main():
         directory = Path(args.episode).parent
         cleanup = capture_and_stop(binding, directory)
         save_binding(directory, binding)
-        require_diagnostic_export(binding)
+        require_cleanup_evidence(binding)
         print(json.dumps(cleanup))
 
 

@@ -128,7 +128,7 @@ class VMTests(unittest.TestCase):
                             output='private configuration', stderr='permission denied\x1b[31m' + 'x' * 3000),
                       subprocess.TimeoutExpired(['docker', 'inspect'], 120,
                             output=b'private configuration', stderr=b'daemon timeout\xff')):
-            with self.subTest(error=type(error).__name__), patch.object(vm, 'capture_container'), \
+            with self.subTest(error=type(error).__name__), patch.object(vm, 'capture_container', return_value={'complete': True}), \
                  patch.object(vm, 'command', side_effect=error):
                 with self.assertRaises(RuntimeError) as raised:
                     vm.capture_and_stop(binding, Path('/unused'))
@@ -149,7 +149,7 @@ class VMTests(unittest.TestCase):
         inspected = {'Id': 'a' * 64, 'Config': {'Labels': {'waa.owner': 'waa-v2', 'waa.episode': 'mine'}}}
         error = subprocess.CalledProcessError(1, ['docker', 'stop'], stderr='original stop failure')
         check_error = subprocess.CalledProcessError(1, ['docker', 'inspect'], stderr='absence check denied')
-        with patch.object(vm, 'capture_container'), patch.object(vm, 'command',
+        with patch.object(vm, 'capture_container', return_value={'complete': True}), patch.object(vm, 'command',
                     side_effect=[json.dumps(inspected), error, check_error]):
             with self.assertRaises(RuntimeError) as raised:
                 vm.capture_and_stop(binding, Path('/unused'))
@@ -279,7 +279,7 @@ class VMTests(unittest.TestCase):
                  patch.object(vm, 'request', return_value={}), patch.object(vm, 'verify_qemu', return_value={}), \
                  patch.object(vm, 'verify_guest_clock', return_value={}), patch.object(vm, 'verify_guest_license', return_value=[]), \
                  patch.object(vm, 'bootstrap'), patch.object(vm, 'token_path', return_value=token), \
-                 patch.object(vm, 'capture_container'), patch.object(vm, 'stop_binding', return_value={'status': 'stopped'}) as stop, \
+                 patch.object(vm, 'capture_container', return_value={'complete': True}), patch.object(vm, 'stop_binding', return_value={'status': 'stopped'}) as stop, \
                  patch('builtins.print', side_effect=print_result):
                 with self.assertRaisesRegex(BrokenPipeError, 'caller disconnected'):
                     vm.start(args)
@@ -326,7 +326,8 @@ class VMTests(unittest.TestCase):
             with patch('sys.argv', ['vm.py', 'stop', '--episode', str(owner)]), \
                  patch.object(vm, 'capture_container', side_effect=OSError('capture denied')), \
                  patch.object(vm, 'stop_binding', return_value={'status': 'stopped'}) as stop:
-                vm.main()
+                with self.assertRaisesRegex(RuntimeError, 'Cleanup evidence incomplete'):
+                    vm.main()
             stop.assert_called_once()
             saved = json.loads(owner.read_text())
             self.assertEqual(saved['cleanup']['status'], 'stopped')
@@ -516,9 +517,10 @@ class VMTests(unittest.TestCase):
             order = []
             def command(argv, **kwargs):
                 return '192.0.2.1' if argv[:2] == ['docker', 'inspect'] else ''
-            def capture(name, directory):
+            def capture(name, directory, **kwargs):
                 self.assertEqual(json.loads((directory / 'episode.json').read_text())['status'], 'failed')
                 order.append('capture')
+                return {'complete': True}
             def stop(binding):
                 order.append('stop')
                 return {'status': 'stopped'}
