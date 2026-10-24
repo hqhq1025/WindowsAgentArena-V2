@@ -115,7 +115,8 @@ class RemoteVMTests(unittest.TestCase):
             progress.write_text(json.dumps({'container': 'owned-vm', 'episode_id': 'mine', 'storage': str(root / 'storage')}))
             with patch.object(vm, 'capture_container', side_effect=OSError('capture denied')), \
                  patch.object(vm, 'stop_binding', return_value={'status': 'stopped'}) as stop:
-                remote_vm.cancel_worker(argparse.Namespace(worker_record=record))
+                with self.assertRaisesRegex(RuntimeError, 'Cleanup evidence incomplete'):
+                    remote_vm.cancel_worker(argparse.Namespace(worker_record=record))
             stop.assert_called_once()
             saved = json.loads(progress.read_text())
             self.assertIn('capture denied', saved['cleanup']['capture_error'])

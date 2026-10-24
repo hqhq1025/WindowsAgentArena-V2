@@ -152,7 +152,7 @@ class ExportTests(unittest.TestCase):
             return {"status": "stopped", "storage_preserved": binding["storage"]}
         with patch.object(vm, "inspect_container", return_value=self.container), \
              patch.object(vm, "execute_diagnostic_read", side_effect=lambda container_id, code, timeout: self.execute(code, timeout)), \
-             patch.object(vm, "capture_container"), \
+             patch.object(vm, "capture_container", return_value={"complete": True}), \
              patch.object(vm, "stop_binding", side_effect=stop):
             vm.capture_and_stop(self.binding, self.output)
         self.assertEqual(order, ["stop"])
@@ -168,7 +168,7 @@ class ExportTests(unittest.TestCase):
         with patch("sys.argv", ["vm.py", "stop", "--episode", str(owner)]), \
              patch.object(vm, "inspect_container", return_value=self.container), \
              patch.object(vm, "execute_diagnostic_read", side_effect=TimeoutError("private")), \
-             patch.object(vm, "capture_container"), patch.object(vm, "stop_binding", return_value={"status": "stopped"}) as stop:
+             patch.object(vm, "capture_container", return_value={"complete": True}), patch.object(vm, "stop_binding", return_value={"status": "stopped"}) as stop:
             with self.assertRaisesRegex(RuntimeError, "preserve episode storage"):
                 vm.main()
         stop.assert_called_once()
@@ -183,7 +183,7 @@ class ExportTests(unittest.TestCase):
         progress.write_text(json.dumps(self.binding))
         with patch.object(vm, "inspect_container", return_value=self.container), \
              patch.object(vm, "execute_diagnostic_read", side_effect=TimeoutError("private")), \
-             patch.object(vm, "capture_container"), patch.object(vm, "stop_binding", return_value={"status": "stopped"}):
+             patch.object(vm, "capture_container", return_value={"complete": True}), patch.object(vm, "stop_binding", return_value={"status": "stopped"}):
             with self.assertRaisesRegex(RuntimeError, "preserve episode storage"):
                 remote_vm.cancel_worker(argparse.Namespace(worker_record=worker))
         self.assertTrue(json.loads(progress.read_text())["storage_reclamation_blocked"])

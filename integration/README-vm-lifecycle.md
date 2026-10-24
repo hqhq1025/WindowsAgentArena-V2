@@ -106,6 +106,21 @@ a failed attempt, or turn a previous failure into successful archival.
 Receipt reuse checks the episode ID, container identity, storage path, episode
 directory, and capture path. Another episode's receipt cannot satisfy cleanup.
 
+The final cleanup gate also blocks failed container evidence capture and failed
+audio capture finalization when audio is enabled. Docker log or inspect failures
+count as capture failures even when their error text was saved successfully.
+These failures do not prevent owned-container shutdown. Local and remote cleanup
+save the failure record before returning nonzero. A successful driver export
+remains marked successful when another capture fails.
+
+Container evidence reads use the inspected full container ID. Repeated cleanup
+may reuse a complete container snapshot only after confirmed container absence.
+Reuse checks the episode, original container identity, capture directory, and both
+actual files. Each new attempt and its error remain recorded. A new successful
+capture can resolve a previous capture error without erasing its record.
+An absent container cannot clear an audio failure or an unconfirmed audio stop.
+The shared final gate is `require_cleanup_evidence`.
+
 The exporter does not expose diagnostics to the evaluated model. It does not read
 task instructions, images, driver configuration, or credentials. Preserve the
 operator-only permissions of the episode directory and its archive.
