@@ -32,7 +32,8 @@
 				"type": "activate_window",
 				"parameters": {
 					"window_name": "Calendar_Highlight_Weekend_Days.xlsx — LibreOffice Calc",
-					"strict": true
+					"strict": true,
+					"open_file_if_missing": "C:\\Users\\Docker\\Downloads\\Calendar_Highlight_Weekend_Days.xlsx"
 				}
 			},
 			{

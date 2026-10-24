@@ -32,7 +32,8 @@
           "type": "activate_window",
           "parameters": {
             "window_name": "LibreOffice_Open_Source_Word_Processing.docx — LibreOffice Writer",
-            "strict": true
+            "strict": true,
+            "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\LibreOffice_Open_Source_Word_Processing.docx"
           }
         },
         {

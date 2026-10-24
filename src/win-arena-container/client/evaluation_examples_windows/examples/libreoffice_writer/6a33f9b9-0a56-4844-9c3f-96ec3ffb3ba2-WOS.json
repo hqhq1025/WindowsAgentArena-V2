@@ -32,7 +32,8 @@
           "type": "activate_window",
           "parameters": {
             "window_name": "sample-recruitment-phone-script.odt — LibreOffice Writer",
-            "strict": true
+            "strict": true,
+            "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\sample-recruitment-phone-script.odt"
           }
         },
         {

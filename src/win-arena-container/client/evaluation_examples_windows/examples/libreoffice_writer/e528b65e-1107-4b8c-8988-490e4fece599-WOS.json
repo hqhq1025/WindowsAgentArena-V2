@@ -33,7 +33,8 @@
         "type": "activate_window",
         "parameters": {
           "window_name": "Geography_And_Magical_Realism.docx — LibreOffice Writer",
-          "strict": true
+          "strict": true,
+          "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\Geography_And_Magical_Realism.docx"
         }
       },
       {

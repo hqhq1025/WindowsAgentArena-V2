@@ -32,7 +32,8 @@
           "type": "activate_window",
           "parameters": {
             "window_name": "Name_Order_Id_move_column.xlsx — LibreOffice Calc",
-            "strict": true
+            "strict": true,
+            "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\Name_Order_Id_move_column.xlsx"
           }
         },
         {

@@ -32,7 +32,8 @@
 				"type": "activate_window",
 				"parameters": {
 					"window_name": "IncomeStatement2.xlsx — LibreOffice Calc",
-					"strict": true
+					"strict": true,
+					"open_file_if_missing": "C:\\Users\\Docker\\Downloads\\IncomeStatement2.xlsx"
 				}
 			},
 			{
