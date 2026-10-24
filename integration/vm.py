@@ -400,19 +400,44 @@ def stop_audio_capture(binding, container_id=None):
     binding['audio_capture'].update(started=False, monitor_stopped=True)
 
 
+def execute_diagnostic_read(container_id, code, timeout):
+    # Execute inside the inspected object's namespace. Its external IP can be
+    # reused after removal; a full Docker object ID cannot select that replacement.
+    script = '''import ipaddress,json,os,sys,urllib.request
+address=str(ipaddress.ip_address(os.environ.get('VM_NET_IP','20.20.20.21')))
+request=urllib.request.Request('http://'+address+':5000/execute',
+ data=json.dumps({'command':['python','-c',sys.argv[1]],'shell':False}).encode(),
+ headers={'Content-Type':'application/json'})
+opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with opener.open(request,timeout=float(sys.argv[2])) as response:
+ data=response.read(2*1024*1024+1)
+ if len(data)>2*1024*1024: raise RuntimeError('Diagnostic response exceeds transfer limit')
+ print(json.dumps(json.loads(data)))
+'''
+    return json.loads(command(['docker', 'exec', container_id, 'python3', '-c', script,
+                               code, str(timeout)], timeout=timeout))
+
+
 def capture_driver_diagnostics(binding, directory):
     if not binding.get('driver_diagnostics_required') and 'bridge_health' not in binding:
         return {'status': 'not_requested_before_bridge_bootstrap', 'export_complete': True}
     container = inspect_container(binding['container'])
     if container is None:
         previous = binding.get('driver_diagnostics_export')
-        if reusable_export(previous):
+        if reusable_export(previous, binding, directory):
             return previous
         return {'status': 'guest_absent_without_complete_export', 'export_complete': False}
     labels = container.get('Config', {}).get('Labels') or {}
     if labels.get('waa.owner') != 'waa-v2' or labels.get('waa.episode') != binding['episode_id']:
         raise RuntimeError('Diagnostic export container ownership does not match this episode')
-    return export_diagnostics(binding, directory, request)
+    container_id = container.get('Id')
+    if not isinstance(container_id, str) or not re.fullmatch(r'[0-9a-f]{64}', container_id):
+        raise RuntimeError('Diagnostic export requires the full owned container ID')
+    if binding.get('container_id', container_id) != container_id:
+        raise RuntimeError('Diagnostic container ID differs from the episode binding')
+    return export_diagnostics(binding, directory,
+                              lambda code, timeout: execute_diagnostic_read(container_id, code, timeout),
+                              container_id)
 
 
 def require_diagnostic_export(binding):

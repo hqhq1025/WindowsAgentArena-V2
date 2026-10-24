@@ -11,6 +11,10 @@ shutdown. Container logs do not contain the driver's separate stderr pipe.
 `driver_diagnostics.py` reads the logger's fixed directory through the existing
 guest controller. UUIDv4 session IDs and two fixed filenames bound the file scope.
 File limits, a session-count limit, and a shared request deadline bound the export.
+The reader runs inside the inspected full Docker container ID and contacts the
+internal Windows address without HTTP proxies. It never selects the guest through
+the external IP in the binding. Receipts bind the episode ID, container identity,
+storage path, episode directory, and capture path; reuse checks those identities.
 The host reads each written file back and preserves capture status separately
 from export completeness. No content hashes or model-visible tools are added.
 
@@ -26,13 +30,15 @@ Server instructions, tool parameters, and benchmark skills need no update becaus
 the export stays in the operator lifecycle. The operator README documents the
 dependency, limits, return status, and recovery boundary.
 
-Validation: all 74 lifecycle tests passed locally. Twelve new tests execute the
+Validation: all 80 lifecycle tests passed locally. Eighteen new tests execute the
 actual guest collection script against local files and use fake controller and
 Docker calls. They cover complete and empty logs, no sessions, missing directory,
 truncation, write-error metadata, active sessions, redirects, oversized files,
 inventory changes, timeouts, owner mismatch, cleanup order, repeat cleanup, and
-local/remote failure propagation. The twelve focused tests passed again after
-the final local-path check. A combined local test ran the new logger with a real
+local/remote failure propagation. Added ownership tests reject reused external IPs,
+foreign receipts, relocated captures, and conflicting container IDs. The internal
+reader script also runs with a mocked HTTP response and proxy environment.
+A combined local test ran the new logger with a real
 fake stdio process, stopped it, and exported its files using the actual guest
 script. The stage and `elapsed=1.25` remained readable; the token was redacted.
 No VM, SSH session, or model was started.
