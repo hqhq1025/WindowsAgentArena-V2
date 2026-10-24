@@ -18,6 +18,10 @@ def saved_file_target(task):
     evaluator = task.get('evaluator', {})
     steps = evaluator.get('postconfig', [])
     activations = [step for step in steps if step['type'] == 'activate_window']
+    if len(activations) == 2 and steps[-1] == activations[-1]:
+        expected = {'window_name': activations[0]['parameters']['window_name'], 'strict': True}
+        if activations[-1]['parameters'] == expected:
+            activations = activations[:1]
     if len(activations) != 1:
         return None
     parameters = activations[0]['parameters']

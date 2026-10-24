@@ -63,7 +63,14 @@
 				"parameters": {
 					"seconds": 0.5
 				}
-			}
+			},
+            {
+                      "type": "activate_window",
+                      "parameters": {
+                                "window_name": "Employee_Age_By_Birthday.xlsx — LibreOffice Calc",
+                                "strict": true
+                      }
+            }
 		],
 		"func": "compare_table",
 		"expected": {

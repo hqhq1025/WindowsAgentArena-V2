@@ -57,6 +57,13 @@
 				"parameters": {
 					"seconds": 0.5
 				}
+			},
+			{
+				"type": "activate_window",
+				"parameters": {
+					"window_name": "DemographicProfile.xlsx — LibreOffice Calc",
+					"strict": true
+				}
 			}
 		],
 		"func": "compare_table",

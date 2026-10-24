@@ -23,8 +23,9 @@ A save to a different path does not replace the declared path.
 The 2026-10-24 audit covers all 141 tasks selected by
 `src/win-arena-container/client/evaluation_examples_windows/test_all.json`.
 It adds paths to 38 tasks: 22 Calc tasks and 16 Writer tasks.
-Each has one strict document-title activation, a save-only postconfig,
+Each has an initial strict document-title activation, a save-only postconfig,
 and one unique `vm_file` path identical to its original `open` path.
+The save sequence also ends with a [window-readiness barrier](post-save-window-barrier.md).
 The other 103 tasks retain their previous preparation: 19 have activation and 84 do not.
 The table lists every changed task and its declared filename;
 its full path is explicit in that task's JSON configuration.
