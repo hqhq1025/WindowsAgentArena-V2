@@ -32,7 +32,8 @@
           "type": "activate_window",
           "parameters": {
             "window_name": "Order_Sales_Serial#.xlsx — LibreOffice Calc",
-            "strict": true
+            "strict": true,
+            "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\Order_Sales_Serial#.xlsx"
           }
         },
         {

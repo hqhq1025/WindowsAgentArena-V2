@@ -32,7 +32,8 @@
                 "type": "activate_window",
                 "parameters": {
                     "window_name": "LARS_Science_Assessment_Resource_List_7-30-21.xlsx — LibreOffice Calc",
-                    "strict": true
+                    "strict": true,
+                    "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\LARS_Science_Assessment_Resource_List_7-30-21.xlsx"
                 }
             },
             {

@@ -32,7 +32,8 @@
 				"type": "activate_window",
 				"parameters": {
 					"window_name": "VLOOKUP_Fill_the_form.xlsx — LibreOffice Calc",
-					"strict": true
+					"strict": true,
+					"open_file_if_missing": "C:\\Users\\Docker\\Downloads\\VLOOKUP_Fill_the_form.xlsx"
 				}
 			},
 			{

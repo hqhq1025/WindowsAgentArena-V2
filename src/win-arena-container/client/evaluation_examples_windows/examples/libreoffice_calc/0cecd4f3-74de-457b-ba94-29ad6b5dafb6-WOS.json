@@ -38,7 +38,8 @@
           "type": "activate_window",
           "parameters": {
             "window_name": "copy_sheet_insert.xlsx — LibreOffice Calc",
-            "strict": true
+            "strict": true,
+            "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\copy_sheet_insert.xlsx"
           }
         },
         {

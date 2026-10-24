@@ -33,7 +33,8 @@
           "type": "activate_window",
           "parameters": {
             "window_name": "04 CHIN9505 EBook Purchasing info 2021 Jan.docx — LibreOffice Writer",
-            "strict": true
+            "strict": true,
+            "open_file_if_missing": "C:\\Users\\Docker\\Downloads\\04 CHIN9505 EBook Purchasing info 2021 Jan.docx"
           }
         },
         {
