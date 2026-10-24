@@ -44,11 +44,23 @@ print(json.dumps(collect()))
 '''
 
 
-def export_diagnostics(binding, directory, request, timeout=30):
+def episode_identity(binding, directory):
+    directory = Path(directory).resolve()
+    if Path(binding["storage"]).resolve() != directory / "storage":
+        raise ValueError("Diagnostic storage does not belong to this episode directory")
+    return {"episode_id": binding["episode_id"], "container": binding["container"],
+            "storage": str(directory / "storage"), "episode_directory": str(directory)}
+
+
+def export_diagnostics(binding, directory, execute, container_id, timeout=30):
     """A failed export preserves storage and cannot become a successful seal."""
-    root = Path(directory) / "driver-diagnostic-captures" / str(uuid.uuid4())
+    identity = episode_identity(binding, directory)
+    if not re.fullmatch(r"[0-9a-f]{64}", container_id):
+        raise ValueError("Diagnostic export requires the full owned container ID")
+    root = Path(identity["episode_directory"]) / "driver-diagnostic-captures" / str(uuid.uuid4())
     root.mkdir(mode=0o700, parents=True, exist_ok=False)
-    report = {"guest_root": GUEST_ROOT, "status": "failed", "export_complete": False,
+    report = {**identity, "container_id": container_id, "guest_root": GUEST_ROOT,
+              "status": "failed", "export_complete": False,
               "diagnostics_complete": False, "sessions": [], "files": [],
               "receipt": str(root / "export.json")}
     deadline = time.monotonic() + timeout
@@ -57,9 +69,7 @@ def export_diagnostics(binding, directory, request, timeout=30):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("Diagnostic export budget exhausted")
-        result = request(binding["controller_url"] + "/execute",
-                         {"command": ["python", "-c", guest_script(session_id)], "shell": False},
-                         timeout=remaining)
+        result = execute(guest_script(session_id), timeout=remaining)
         if result.get("returncode") != 0:
             raise RuntimeError("Guest diagnostic read failed")
         return json.loads(result["output"])
@@ -126,12 +136,23 @@ def export_diagnostics(binding, directory, request, timeout=30):
     return report
 
 
-def reusable_export(report):
+def reusable_export(report, binding, directory):
     """An absent VM may reuse a complete prior export, never a failed recapture."""
     if not isinstance(report, dict) or report.get("export_complete") is not True:
         return False
     try:
+        identity = episode_identity(binding, directory)
+        if any(report.get(key) != value for key, value in identity.items()):
+            return False
+        if not re.fullmatch(r"[0-9a-f]{64}", report.get("container_id", "")):
+            return False
+        if binding.get("container_id", report["container_id"]) != report["container_id"]:
+            return False
         receipt = Path(report["receipt"])
+        expected_root = Path(identity["episode_directory"]) / "driver-diagnostic-captures"
+        if (receipt.name != "export.json" or not SESSION.fullmatch(receipt.parent.name)
+                or receipt.parent.parent != expected_root or receipt.resolve() != receipt):
+            return False
         saved = json.loads(receipt.read_text())
         if saved != report:
             return False

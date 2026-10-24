@@ -81,6 +81,10 @@ per-session log and status format. It does not install or start the logger itsel
 Stop the MCP session before the VM cleanup command. Cleanup reads only UUIDv4
 session directories and the `stderr.log` and `status.json` files inside them.
 It rejects redirected paths, oversized files, and incomplete session status.
+The reader runs through `docker exec` with the inspected full container ID.
+It contacts the internal Windows address (`VM_NET_IP`, default `20.20.20.21`),
+with HTTP proxies disabled. Reuse of the container's external IP cannot redirect
+the export. The container image must provide Python 3 for this reader.
 Each attempt writes a new `driver-diagnostic-captures/<attempt UUID>/` directory
 inside the episode metadata directory. Files receive an immediate byte-for-byte
 readback check. The existing metadata archiver then copies these files to the host.
@@ -99,10 +103,15 @@ until the missing diagnostics are recovered or an operator explicitly retires
 the evidence. A repeated cleanup after VM removal can reuse a complete prior
 receipt whose declared local files still exist. It cannot replace success with
 a failed attempt, or turn a previous failure into successful archival.
+Receipt reuse checks the episode ID, container identity, storage path, episode
+directory, and capture path. Another episode's receipt cannot satisfy cleanup.
 
 The exporter does not expose diagnostics to the evaluated model. It does not read
 task instructions, images, driver configuration, or credentials. Preserve the
 operator-only permissions of the episode directory and its archive.
+Embedding tools that load `vm.py` dynamically must add the selected runtime's
+`integration` directory to `sys.path` before loading it. `vm.py` imports the sibling
+`driver_diagnostics.py`; copying or loading `vm.py` alone is insufficient.
 
 ## Remote VM host
 
