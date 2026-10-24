@@ -16,6 +16,8 @@ import tempfile
 import time
 import urllib.request
 
+from driver_diagnostics import export_diagnostics, reusable_export
+
 ROOT = Path(os.environ.get('WAA_ROOT', str(Path.home() / '.local/share/waa-v2')))
 REPO = Path(__file__).resolve().parents[1]
 # The supported container uses legacy IPv4 and nft IPv6 filter tables.
@@ -347,9 +349,35 @@ def stop_binding(binding):
     return {'status': 'stopped', 'container': name, 'storage_preserved': binding['storage']}
 
 
+def capture_driver_diagnostics(binding, directory):
+    if not binding.get('driver_diagnostics_required') and 'bridge_health' not in binding:
+        return {'status': 'not_requested_before_bridge_bootstrap', 'export_complete': True}
+    container = inspect_container(binding['container'])
+    if container is None:
+        previous = binding.get('driver_diagnostics_export')
+        if reusable_export(previous):
+            return previous
+        return {'status': 'guest_absent_without_complete_export', 'export_complete': False}
+    labels = container.get('Config', {}).get('Labels') or {}
+    if labels.get('waa.owner') != 'waa-v2' or labels.get('waa.episode') != binding['episode_id']:
+        raise RuntimeError('Diagnostic export container ownership does not match this episode')
+    return export_diagnostics(binding, directory, request)
+
+
+def require_diagnostic_export(binding):
+    if binding.get('storage_reclamation_blocked'):
+        raise RuntimeError('Driver diagnostic export incomplete; preserve episode storage and inspect its capture receipt')
+
+
 def capture_and_stop(binding, directory):
     """Keep evidence failures visible without allowing them to block owned VM cleanup."""
     capture_error = None
+    try:
+        diagnostics = capture_driver_diagnostics(binding, directory)
+    except Exception as exc:
+        diagnostics = {'status': 'failed', 'export_complete': False, 'error_type': type(exc).__name__}
+    binding['driver_diagnostics_export'] = diagnostics
+    binding['storage_reclamation_blocked'] = not diagnostics['export_complete']
     try:
         capture_container(binding['container'], directory)
     except Exception as exc:
@@ -361,6 +389,8 @@ def capture_and_stop(binding, directory):
     if capture_error is not None:
         cleanup['capture_error'] = capture_error
     binding['cleanup'] = cleanup
+    cleanup['driver_diagnostics_export'] = diagnostics
+    cleanup['storage_reclamation_blocked'] = binding['storage_reclamation_blocked']
     if capture_error is not None:
         print('Container evidence capture failed: ' + capture_error, file=sys.stderr, flush=True)
     return cleanup
@@ -530,6 +560,8 @@ def start(args):
                   activation_worker=getattr(args, 'activation_worker', None),
                   activation_revision=getattr(args, 'activation_revision', None),
                   activation_server_dir=getattr(args, 'activation_server_dir', r'C:\OEM\server'))
+        binding['driver_diagnostics_required'] = True
+        save_binding(directory, binding)
         for _ in range(20):
             try:
                 health = request(binding['bridge_url'] + '/health', {}, timeout=3,
@@ -616,6 +648,7 @@ def main():
         directory = Path(args.episode).parent
         cleanup = capture_and_stop(binding, directory)
         save_binding(directory, binding)
+        require_diagnostic_export(binding)
         print(json.dumps(cleanup))
 
 
