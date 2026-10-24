@@ -111,6 +111,37 @@ Pipe checks cannot detect detached descendants that close their inherited pipes.
 The bridge trusts the configured server's output; notifications and MCP message
 sizes are not bounded. Run only trusted MCP servers in the isolated guest.
 
+### Driver stderr
+
+The CLI saves driver stderr under `driver-diagnostics/<session UUID>/` beside
+the configuration file. `--diagnostics-dir` selects a different operator directory.
+Each server-generated session ID owns a new `stderr.log` and `status.json`.
+Session stop preserves these files. The Python `Bridge` constructor accepts
+`diagnostics_dir`; direct callers must set it to enable persistence.
+
+The bridge reads 4096-byte blocks and saves the first 1 MiB after redaction.
+It keeps draining the pipe after reaching this limit. `status.json` records raw
+received bytes, saved bytes, discarded redacted bytes, truncation, reader completion,
+session closure, and capture errors. An empty log with no errors means the driver
+emitted no stderr. Missing or failed capture does not establish that fact.
+Status updates occur at most once per second during reading and again at closure.
+A bridge crash can leave the final status update missing.
+
+The bridge redacts its token and literal credential values from the child environment,
+including values whose names contain `TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`,
+`CREDENTIAL`, `KEY`, or `AUTH`. Redaction works across read boundaries.
+It does not log request bodies, commands, or environment listings.
+Unknown secrets and encoded values in driver output can remain. Keep this directory
+private, with the same operator-only permissions as the configuration file.
+Noncredential runtime flags remain readable so diagnostic timings are not corrupted.
+Capture failures produce only an operation and exception type in the bridge log.
+Diagnostic content never enters MCP results or the model-visible tool surface.
+
+Before VM shutdown, the operator exporter must copy `driver-diagnostics` into
+the episode metadata directory. Preserve `status.json`, including errors and
+truncation. Then use the existing metadata archive. Archiving episode metadata
+alone cannot recover guest files from an already stopped VM.
+
 PowerShell uses temporary files for output, so an intentionally launched GUI
 can survive successful shell completion without blocking on inherited pipes.
 On Windows, a supervisor waits until the bridge assigns it to a Job Object.

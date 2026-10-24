@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import queue
+import re
 import subprocess
 import sys
 import tempfile
@@ -154,8 +155,84 @@ def interactive_session():
     return session.value
 
 
+class StderrDiagnostics:
+    """Keep an operator-only prefix; keep draining after its capacity is reached."""
+    LIMIT = 1024 * 1024
+
+    def __init__(self, directory, secrets):
+        self.directory = Path(directory)
+        values = sorted({value.encode("utf-8") for value in secrets if value}, key=len, reverse=True)
+        self.pattern = re.compile(b"|".join(re.escape(value) for value in values)) if values else None
+        self.keep = max(map(len, values), default=1) - 1
+        self.directory.mkdir(mode=0o700, parents=True, exist_ok=False)
+        self.stream = (self.directory / "stderr.log").open("xb", buffering=0)
+        self.pending = b""
+        self.state = {"limit_bytes": self.LIMIT, "received_bytes": 0, "saved_bytes": 0,
+                      "discarded_bytes": 0, "truncated": False, "reader_done": False,
+                      "session_closed": False, "errors": []}
+        self.last_status = 0
+        self.save_status()
+
+    def error(self, operation, exc):
+        # Exception messages can contain paths, commands, or payloads.
+        label = operation + ":" + type(exc).__name__
+        if label not in self.state["errors"]:
+            self.state["errors"].append(label)
+            print("Driver diagnostic capture failed: " + label, file=sys.stderr, flush=True)
+
+    def save_status(self):
+        try:
+            temporary = self.directory / "status.json.tmp"
+            temporary.write_text(json.dumps(self.state, indent=2) + "\n", encoding="utf-8")
+            temporary.replace(self.directory / "status.json")
+        except OSError as exc:
+            self.error("status", exc)
+        self.last_status = time.monotonic()
+
+    def write(self, chunk, final=False):
+        self.state["received_bytes"] += len(chunk)
+        self.pending += chunk
+        cutoff = len(self.pending) if final else max(0, len(self.pending) - self.keep)
+        position, output = 0, bytearray()
+        if self.pattern:
+            for match in self.pattern.finditer(self.pending):
+                if match.start() >= cutoff:
+                    break
+                output.extend(self.pending[position:match.start()])
+                output.extend(b"[REDACTED]")
+                position = match.end()
+        end = max(position, cutoff)
+        output.extend(self.pending[position:end])
+        self.pending = self.pending[end:]
+        available = max(0, self.LIMIT - self.state["saved_bytes"])
+        selected = output[:available]
+        written = 0
+        try:
+            if selected:
+                written = self.stream.write(selected)
+                self.state["saved_bytes"] += written
+                if written != len(selected):
+                    raise OSError("Incomplete diagnostic write")
+        except OSError as exc:
+            self.error("stderr", exc)
+        dropped = len(output) - written
+        self.state["discarded_bytes"] += dropped
+        self.state["truncated"] = self.state["discarded_bytes"] > 0
+        if time.monotonic() - self.last_status >= 1:
+            self.save_status()
+
+    def finish(self):
+        self.write(b"", final=True)
+        try:
+            self.stream.close()
+        except OSError as exc:
+            self.error("close", exc)
+        self.state["reader_done"] = True
+        self.save_status()
+
+
 class Session:
-    def __init__(self, config):
+    def __init__(self, config, diagnostics=None):
         shell = config.get("powershell", {})
         if not isinstance(shell, dict) or set(shell) - {"executable", "expected_version"}:
             raise ValueError("powershell must contain only executable and expected_version")
@@ -168,6 +245,7 @@ class Session:
                 or not self.powershell_expected_version):
             raise ValueError("PowerShell expected_version must be a non-empty string")
         self.powershell_runtime = None
+        self.diagnostics = diagnostics
         self.process = subprocess.Popen(
             config["command"], cwd=config.get("cwd"),
             env={**os.environ, **config.get("env", {})}, shell=False,
@@ -212,8 +290,19 @@ class Session:
             raise BridgeFailure("MCP send failed; action outcome unknown: " + str(errors[0]), 502)
 
     def _read_stderr(self):
-        for line in self.process.stderr:
-            self.stderr.append(line[-4096:].rstrip())
+        try:
+            # readline can allocate an unbounded line before applying a suffix cap.
+            while chunk := self.process.stderr.buffer.read1(4096):
+                if self.diagnostics:
+                    self.diagnostics.write(chunk)
+                else:
+                    self.stderr.append(chunk.decode("utf-8", errors="replace").rstrip())
+        except Exception as exc:
+            if self.diagnostics:
+                self.diagnostics.error("reader", exc)
+        finally:
+            if self.diagnostics:
+                self.diagnostics.finish()
 
     def _read(self):
         try:
@@ -341,6 +430,9 @@ class Session:
                 raise BridgeFailure(self.shutdown_error, 503)
             for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
                 stream.close()
+            if self.diagnostics:
+                self.diagnostics.state.update(session_closed=True, returncode=self.process.poll())
+                self.diagnostics.save_status()
 
     def shell_runtime(self, timeout=15):
         if os.name != "nt":
@@ -424,10 +516,11 @@ class Session:
 
 
 class Bridge:
-    def __init__(self, config, token):
+    def __init__(self, config, token, diagnostics_dir=None):
         if not token:
             raise ValueError("Bridge token must be non-empty")
         self.token = token
+        self.diagnostics_dir = Path(diagnostics_dir) if diagnostics_dir is not None else None
         self.arms = config["arms"]
         for arm in self.arms.values():
             command = arm.get("command")
@@ -460,7 +553,19 @@ class Bridge:
                 if self.sessions:
                     raise BridgeFailure("Desktop already owns a session; stop it before switching arms", 409)
                 session_id = str(uuid.uuid4())
-                self.sessions[session_id] = Session(config)
+                diagnostics = None
+                if self.diagnostics_dir is not None:
+                    values = [self.token]
+                    values.extend(value for key, value in {**os.environ, **config.get("env", {})}.items()
+                                  if re.search(r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|KEY|AUTH", key, re.I))
+                    diagnostics = StderrDiagnostics(self.diagnostics_dir / session_id, values)
+                try:
+                    self.sessions[session_id] = Session(config, diagnostics)
+                except Exception as exc:
+                    if diagnostics:
+                        diagnostics.error("start", exc)
+                        diagnostics.finish()
+                    raise
             return {"session_id": session_id, "arm": arm, "desktop_session": self.desktop_session}
         if path not in ("/session/call", "/session/stop", "/session/powershell", "/session/runtime"):
             raise BridgeFailure("Unknown route", 404)
@@ -519,9 +624,12 @@ def main():
     parser.add_argument("--token-file", required=True)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=5051)
+    parser.add_argument("--diagnostics-dir", type=Path,
+                        help="Operator-only stderr directory; defaults beside the config file")
     args = parser.parse_args()
     bridge = Bridge(json.loads(Path(args.config).read_text(encoding="utf-8-sig")),
-                    Path(args.token_file).read_text(encoding="utf-8-sig").strip())
+                    Path(args.token_file).read_text(encoding="utf-8-sig").strip(),
+                    args.diagnostics_dir or Path(args.config).resolve().parent / "driver-diagnostics")
     server = make_server(bridge, args.host, args.port)
     try:
         server.serve_forever()
