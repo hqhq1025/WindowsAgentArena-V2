@@ -3,6 +3,7 @@ import io
 import os
 from pathlib import Path
 import struct
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -17,6 +18,18 @@ from guest_mcp_bridge import Command
 
 class CodexAgentTests(unittest.TestCase):
     IDENTITY = '["waa","run / 1","hcu","任务/full-id"]'
+
+    def test_guest_status_protocol_survives_non_unicode_windows_locale(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = {'status': 'completed', 'final_message': '中文、日本語、🙂'}
+            (root / 'status.json').write_text(json.dumps(expected), encoding='utf-8')
+            command = [sys.executable, str(Path(codex_agent.__file__).with_name('guest_codex.py')),
+                       'status', '--root', str(root)]
+            result = subprocess.run(command, capture_output=True, env={**os.environ,
+                'PYTHONIOENCODING': 'cp1252', 'PYTHONUTF8': '0'}, check=True)
+            self.assertEqual(json.loads(result.stdout.decode('ascii')), expected)
 
     def budget(self, **changes):
         state = {'enabled': True, 'limit': 100, 'unit': 'responses_completed_response',

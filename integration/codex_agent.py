@@ -186,7 +186,7 @@ def run_guest_codex(args, arm, driver, task, controller, folder):
             raise TimeoutError('Guest Codex supervisor did not publish its terminal status')
         result.update(state)
         marker = state.get('final_message', '').strip().splitlines()
-        declaration = marker[-1].removeprefix('WAA_STATUS: ') if marker else None
+        declaration = marker[-1][len('WAA_STATUS: '):] if marker and marker[-1].startswith('WAA_STATUS: ') else None
         result['completion_declaration'] = declaration if declaration in {'done', 'infeasible', 'failed'} else None
         after = require_budget(args.gateway, identity)
         result.update(budget_after=after, successful_model_responses=after['completed'],

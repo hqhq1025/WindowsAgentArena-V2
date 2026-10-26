@@ -149,7 +149,7 @@ def main():
     else:
         path = args.root / 'status.json'
         result = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {'status': 'starting'}
-    print(json.dumps(result, ensure_ascii=False))
+    print(json.dumps(result, ensure_ascii=True))
 
 
 if __name__ == '__main__':
