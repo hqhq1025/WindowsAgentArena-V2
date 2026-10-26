@@ -4,10 +4,12 @@ import json
 from pathlib import Path, PureWindowsPath
 import time
 
+import requests
+
 from model_agent import PhaseDeadline
 
 
-CHANGE_ID = "waa-finalization-artifact-export-20261023-r1"
+CHANGE_ID = "waa-finalization-artifact-export-20261026-r2-stat-evidence"
 EXPORT_TIMEOUT_SECONDS = 30.0
 
 
@@ -39,8 +41,69 @@ def declared_files(task):
                               "error": "Output dest has no filename"})
                 continue
             files.append({"getter_index": getter_index, "guest_path": path,
+                          "source_path": path,
                           "declared_dest": dest, "filename": name})
     return files
+
+
+def read_file(controller, item, timeout):
+    """Keep HTTP failure evidence that the upstream controller discards."""
+    server = getattr(controller, "http_server", None)
+    if not isinstance(server, str):
+        return controller.get_file(item["guest_path"])
+    with requests.post(server.rstrip("/") + "/file", data={"file_path": item["guest_path"]},
+                       timeout=timeout) as response:
+        item["http_status"] = response.status_code
+        if response.status_code == 200:
+            return response.content
+        item.update(status="unavailable", error=f"HTTP {response.status_code} while reading declared output",
+                    http_error_body=response.text[:8192], http_error_truncated=len(response.text) > 8192)
+        return None
+
+
+def query_file_absence(controller, item, folder, root, index, deadline, budget):
+    """Only a successful guest os.stat query can prove an absent output."""
+    path = item["guest_path"]
+    script = "import json,os\npath=" + repr(path) + "\n" + (
+        "try:\n os.stat(path)\nexcept FileNotFoundError:\n exists=False\n"
+        "else:\n exists=True\nprint(json.dumps({'guest_path':path,'exists':exists}))\n")
+    original = {key: item[key] for key in
+                ("status", "error", "http_status", "http_error_body", "http_error_truncated") if key in item}
+    evidence = {"status": "unknown", "query_succeeded": False, "exists": None,
+                "guest_path": path, "original_read": original, "query": script,
+                "observation": None}
+    try:
+        if budget <= 0:
+            raise TimeoutError("No file export budget remains for guest stat")
+        with deadline(budget):
+            response = controller.execute_python_command(script)
+            if not isinstance(response, dict):
+                raise ValueError("Guest stat returned no structured execution result")
+            evidence["query_response"] = response
+            observation = {"returncode": response.get("returncode"),
+                           "stdout": response.get("output"), "stderr": response.get("error")}
+            evidence["observation"] = observation
+            if (type(observation["returncode"]) is not int or observation["returncode"] != 0
+                    or not isinstance(observation["stdout"], str) or observation["stderr"] != ""):
+                raise ValueError("Guest stat execution did not complete cleanly")
+            result = json.loads(observation["stdout"])
+            if (not isinstance(result, dict) or result.get("guest_path") != path
+                    or type(result.get("exists")) is not bool):
+                raise ValueError("Guest stat output does not identify this declared file")
+            evidence.update(status="completed", query_succeeded=True, exists=result["exists"])
+    except (PhaseDeadline, TimeoutError) as exc:
+        evidence.update(status="timeout", error=f"{type(exc).__name__}: {exc}")
+    except Exception as exc:
+        evidence.update(status="error", error=f"{type(exc).__name__}: {exc}")
+    target = root / "missing" / f"{index:03d}-stat.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Publish missing only after its complete evidence has reached disk.
+    with target.open("x", encoding="utf-8") as stream:
+        stream.write(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
+    relative = target.relative_to(folder).as_posix()
+    item.update(stat_evidence=relative, stat_query_status=evidence["status"])
+    if evidence["query_succeeded"] and evidence["exists"] is False:
+        item.update(status="missing", missing_evidence=relative)
 
 
 def export_phase(controller, task, folder, identity, stage, deadline,
@@ -72,12 +135,17 @@ def export_phase(controller, task, folder, identity, stage, deadline,
         item["host_path"] = str(target)
         item["timeout_seconds"] = budget
         temporary = target.with_name(target.name + ".partial")
+        read_attempted = False
+        read_succeeded = False
         try:
             with deadline(budget):
-                data = controller.get_screenshot() if item is screenshot else controller.get_file(item["guest_path"])
+                read_attempted = True
+                data = controller.get_screenshot() if item is screenshot else read_file(controller, item, budget)
+                read_succeeded = isinstance(data, bytes)
                 item["read_finished_at"] = timestamp()
                 if data is None or (item is screenshot and data == b""):
-                    item.update(status="unavailable", error="Controller returned no bytes; cause is not classified as missing")
+                    item.setdefault("status", "unavailable")
+                    item.setdefault("error", "Controller returned no bytes; cause is not classified as missing")
                 elif not isinstance(data, bytes):
                     item.update(status="error", error="Controller returned a non-bytes payload")
                 else:
@@ -100,6 +168,18 @@ def export_phase(controller, task, folder, identity, stage, deadline,
                 temporary.unlink(missing_ok=True)
             except OSError as exc:
                 item["partial_cleanup_error"] = str(exc)
+        if (interruption is None and item is not screenshot and read_attempted and not read_succeeded
+                and item.get("status") in {"unavailable", "error"}):
+            try:
+                query_budget = cutoff - remaining + budget - time.monotonic()
+                query_file_absence(controller, item, folder, root, index, deadline, query_budget)
+            except Exception as exc:
+                item["stat_evidence_error"] = f"{type(exc).__name__}: {exc}"
+            except BaseException as exc:
+                interruption = exc
+                item.update(status="interrupted", stat_evidence_error=f"{type(exc).__name__}: {exc}")
+                report["status"] = "interrupted"
+            item["finished_at"] = timestamp()
         if interruption is not None:
             for later in operations[index + 1:]:
                 later.update(status="not_attempted", reason="Export phase interrupted")

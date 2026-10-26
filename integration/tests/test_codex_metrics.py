@@ -138,6 +138,49 @@ class CodexMetricsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'different task route'):
             extract_metrics(self.root, {'task_id': 'route-2', 'completed': 1})
 
+    def test_real_windows_login_preflight_rejection_has_no_measured_duration(self):
+        rejection = 'login shell is disabled by config; omit `login` or set it to false.'
+        self.rollout([
+            record('response_item', {'type': 'function_call', 'call_id': 'rejected', 'name': 'exec_command',
+                                    'arguments': '{"login":true,"cmd":"Get-Date"}'}),
+            record('response_item', {'type': 'function_call_output', 'call_id': 'rejected', 'output': rejection}),
+            record('response_item', {'type': 'function_call', 'call_id': 'printed', 'name': 'exec_command', 'arguments': '{}'}),
+            record('response_item', {'type': 'function_call_output', 'call_id': 'printed',
+                'output': 'Chunk ID: abc\nWall time: 0.1000 seconds\nProcess exited with code 0\nOutput:\n' + rejection}),
+            record('response_item', {'type': 'function_call', 'call_id': 'untyped', 'name': 'exec_command', 'arguments': '{}'}),
+            record('response_item', {'type': 'function_call_output', 'call_id': 'untyped', 'output': 'some unknown error text'}),
+        ])
+        result = extract_metrics(self.root)
+        rejected, printed, untyped = result['tool_calls']
+        self.assertTrue(rejected['error'])
+        self.assertIsNone(rejected['duration_seconds'])
+        self.assertFalse(printed['error'])
+        self.assertIsNone(untyped['error'])
+        self.assertEqual(result['tool_error_count'], 1)
+
+    def test_native_duration_survives_later_output_wrapper_and_image_blocks(self):
+        # Shapes and ordering captured from the Windows 0.164 HCU canary:
+        # response call -> paginated native completion -> wrapped response output.
+        self.rollout([
+            record('response_item', {'type': 'function_call', 'call_id': 'gui-1', 'name': 'GUI', 'arguments': '{}'}),
+            record('event_msg', {'type': 'item_completed', 'thread_id': 'thread-1', 'turn_id': 'turn-1',
+                'completed_at_ms': 1000, 'item': {'type': 'McpToolCall', 'id': 'gui-1',
+                'server': 'computer_use', 'tool': 'GUI', 'arguments': {}, 'status': 'completed',
+                'result': {'content': [{'type': 'image', 'mimeType': 'image/png', 'data': 'AA=='}], 'isError': False},
+                'duration': {'secs': 0, 'nanos': 321486949}}}),
+            record('response_item', {'type': 'function_call_output', 'call_id': 'gui-1', 'output': [
+                {'type': 'input_text', 'text': 'Wall time: 0.3446 seconds\nOutput:'},
+                {'type': 'input_text', 'text': '{"ok":true,"input_emitted":false}'},
+                {'type': 'input_image', 'image_url': 'data:image/png;base64,AA=='},
+            ]}),
+        ])
+        result = extract_metrics(self.root)
+        self.assertEqual(result['tool_count'], 1)
+        self.assertEqual(result['tool_counts']['GUI'], 1)
+        self.assertEqual(result['tool_duration_seconds_sum'], 0.321486949)
+        self.assertEqual(result['tool_calls'][0]['duration_source'], 'native_duration')
+        self.assertEqual(result['tool_error_count'], 0)
+
 
 if __name__ == '__main__':
     unittest.main()

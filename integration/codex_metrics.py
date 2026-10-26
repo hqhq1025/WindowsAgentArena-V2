@@ -45,6 +45,12 @@ def output_evidence(output, call):
             output_evidence(output[0].get('text'), call)
         return
     if isinstance(output, str):
+        # Codex 0.164 unified_exec::get_command returns this bare string
+        # before spawning a shell. Match the whole envelope, not program text.
+        if (call['category'] == 'native_shell' and
+                output == 'login shell is disabled by config; omit `login` or set it to false.'):
+            call['error'] = True
+            return
         try:
             output = json.loads(output)
         except (ValueError, TypeError):
@@ -53,7 +59,7 @@ def output_evidence(output, call):
             prefix = output.split('\nOutput:', 1)[0].split('\nFinal output:', 1)[0]
             if re.match(r'^(?:(?:Chunk ID: [^\n]+|Exit code: -?\d+)\n)?Wall time: ', prefix):
                 match = re.search(r'^Wall time: ([0-9.]+) seconds$', prefix, re.M)
-                if match:
+                if match and call['duration_source'] != 'native_duration':
                     call['duration_seconds'] = number(float(match[1]))
                     call['duration_source'] = 'codex_output_prefix'
                 if call['category'] == 'native_shell':
@@ -69,7 +75,7 @@ def output_evidence(output, call):
             if isinstance(metadata.get('exit_code'), int):
                 call['error'] = metadata['exit_code'] != 0
             elapsed = number(metadata.get('duration_seconds'))
-            if elapsed is not None:
+            if elapsed is not None and call['duration_source'] != 'native_duration':
                 call.update(duration_seconds=elapsed, duration_source='codex_output_metadata')
 
 

@@ -5,6 +5,9 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -67,6 +70,128 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(report["files"][0]["status"], "unavailable")
         self.assertEqual(report["screenshot"]["status"], "error")
 
+    def test_http_error_and_real_stat_absence_produce_relative_missing_evidence(self):
+        class MissingFile(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(500)
+                self.end_headers()
+                self.wfile.write(b"original guest HTTP file-read failure")
+            def log_message(self, *_):
+                pass
+        server = ThreadingHTTPServer(("127.0.0.1", 0), MissingFile)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        def execute(script):
+            result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=False)
+            return {"returncode": result.returncode, "output": result.stdout, "error": result.stderr}
+        controller = SimpleNamespace(http_server=f"http://127.0.0.1:{server.server_port}",
+                                     execute_python_command=execute, get_screenshot=lambda: b"image")
+        with tempfile.TemporaryDirectory() as temp:
+            guest_path = str(Path(temp) / "absent-output.xlsx")
+            task = {"evaluator": {"result": {"type": "vm_file", "path": guest_path, "dest": "output.xlsx"}}}
+            report = export_phase(controller, task, temp, {}, "post-evaluator", contextlib.nullcontext,
+                                  state_stability="stable")
+            item = report["files"][0]
+            self.assertEqual(item["status"], "missing")
+            self.assertEqual(item["source_path"], guest_path)
+            self.assertFalse(Path(item["missing_evidence"]).is_absolute())
+            proof = json.loads((Path(temp) / item["missing_evidence"]).read_text())
+            self.assertEqual((proof["status"], proof["query_succeeded"], proof["exists"]), ("completed", True, False))
+            self.assertEqual(proof["original_read"]["http_status"], 500)
+            self.assertEqual(proof["original_read"]["http_error_body"], "original guest HTTP file-read failure")
+            self.assertEqual(proof["observation"]["stdout"], proof["query_response"]["output"])
+            self.assertEqual(json.loads(proof["observation"]["stdout"]), {"guest_path": guest_path, "exists": False})
+            self.assertEqual(proof["observation"]["returncode"], 0)
+            self.assertEqual(proof["observation"]["stderr"], "")
+            self.assertEqual(report["screenshot"]["status"], "saved")
+
+    def test_unknown_failed_or_mismatched_stat_never_becomes_missing(self):
+        path = TASK["evaluator"]["result"]["path"]
+        def result(exists=False, guest_path=path, **overrides):
+            return {"returncode": 0, "output": json.dumps({"guest_path": guest_path, "exists": exists}),
+                    "error": "", **overrides}
+        for reply in (None, result(returncode=1), result(error="permission error"), result(True),
+                      result(0), result(guest_path="different"), result(output="not json"),
+                      TimeoutError("transport timeout")):
+            with self.subTest(reply=reply), tempfile.TemporaryDirectory() as temp:
+                controller = Mock()
+                controller.get_file.return_value = None
+                controller.get_screenshot.return_value = b"image"
+                if isinstance(reply, Exception):
+                    controller.execute_python_command.side_effect = reply
+                else:
+                    controller.execute_python_command.return_value = reply
+                report = export_phase(controller, TASK, temp, {}, "pre-evaluator", contextlib.nullcontext,
+                                      state_stability="unknown")
+                item = report["files"][0]
+                self.assertEqual(item["status"], "unavailable")
+                self.assertNotIn("missing_evidence", item)
+                proof = json.loads((Path(temp) / item["stat_evidence"]).read_text())
+                self.assertEqual(proof["original_read"]["status"], "unavailable")
+                self.assertEqual(report["screenshot"]["status"], "saved")
+
+    def test_guest_stat_error_is_not_caught_as_file_absence(self):
+        controller = Mock()
+        controller.get_file.return_value = None
+        controller.get_screenshot.return_value = b"image"
+        def execute(script):
+            with patch("os.stat", side_effect=PermissionError("access denied")):
+                with self.assertRaises(PermissionError):
+                    exec(script, {})
+            return {"returncode": 1, "output": "", "error": "PermissionError: access denied"}
+        controller.execute_python_command.side_effect = execute
+        with tempfile.TemporaryDirectory() as temp:
+            report = export_phase(controller, TASK, temp, {}, "post-evaluator", contextlib.nullcontext,
+                                  state_stability="stable")
+            self.assertEqual(report["files"][0]["status"], "unavailable")
+
+    def test_stat_cannot_borrow_screenshot_time_budget(self):
+        controller = Mock()
+        controller.get_file.return_value = None
+        controller.get_screenshot.return_value = b"image"
+        with tempfile.TemporaryDirectory() as temp, \
+             patch.object(artifact_export.time, "monotonic", side_effect=[0, 0, 16, 16]):
+            report = export_phase(controller, TASK, temp, {}, "pre-evaluator", contextlib.nullcontext,
+                                  state_stability="unknown", timeout=30)
+            self.assertEqual(report["files"][0]["status"], "unavailable")
+            self.assertEqual(report["files"][0]["stat_query_status"], "timeout")
+            self.assertEqual(report["screenshot"]["status"], "saved")
+            controller.execute_python_command.assert_not_called()
+
+    def test_missing_screenshot_never_uses_stat_proof(self):
+        controller = Mock()
+        controller.get_screenshot.return_value = None
+        with tempfile.TemporaryDirectory() as temp:
+            report = export_phase(controller, {}, temp, {}, "post-evaluator", contextlib.nullcontext,
+                                  state_stability="stable")
+            self.assertEqual(report["screenshot"]["status"], "unavailable")
+            self.assertNotIn("missing_evidence", report["screenshot"])
+            controller.execute_python_command.assert_not_called()
+
+    def test_missing_requires_persisted_evidence_and_keeps_original_error(self):
+        controller = Mock()
+        controller.get_file.side_effect = ConnectionError("original download transport error")
+        controller.get_screenshot.return_value = b"image"
+        controller.execute_python_command.return_value = {"returncode": 0, "error": "",
+            "output": json.dumps({"guest_path": TASK["evaluator"]["result"]["path"], "exists": False})}
+        original_open = Path.open
+        def fail_evidence(path, *args, **kwargs):
+            if path.name.endswith("-stat.json"):
+                raise OSError("evidence disk full")
+            return original_open(path, *args, **kwargs)
+        with tempfile.TemporaryDirectory() as temp, patch.object(Path, "open", fail_evidence):
+            report = export_phase(controller, TASK, temp, {}, "post-evaluator", contextlib.nullcontext,
+                                  state_stability="stable")
+            item = report["files"][0]
+            self.assertEqual(item["status"], "error")
+            self.assertIn("original download transport error", item["error"])
+            self.assertIn("evidence disk full", item["stat_evidence_error"])
+            self.assertNotIn("missing_evidence", item)
+            self.assertEqual(report["screenshot"]["status"], "saved")
+
     def test_disk_failure_is_recorded_without_leaving_partial_file(self):
         controller = Mock()
         controller.get_file.return_value = b"output"
@@ -82,6 +207,7 @@ class ExportTests(unittest.TestCase):
             self.assertEqual(report["files"][0]["status"], "error")
             self.assertEqual(report["screenshot"]["status"], "error")
             self.assertEqual(list(Path(temp).rglob("*.partial")), [])
+            controller.execute_python_command.assert_not_called()
 
     def test_interrupted_phase_preserves_partial_manifest_and_propagates(self):
         for exception in (KeyboardInterrupt("cancel"), SystemExit("stop")):

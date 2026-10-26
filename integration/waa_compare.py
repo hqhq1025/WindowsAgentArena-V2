@@ -566,9 +566,18 @@ def main():
         for arm in (arms if index % 2 == 0 else list(reversed(arms))):
             results.append(run_episode(args, arm, drivers[arm], domain, task, args.output / arm / task["_selection_id"]))
             write_json(args.output / "results.json", results)
+            terminal = results[-1]
+            stopped = (terminal["vm_cleanup_status"] == "error" or
+                       terminal.get("error_kind") in {"rate_limit", "routing"} or
+                       terminal["status"] in {"interrupted", "cancelled"})
+            manifest.update(recorded_episode_count=len(results),
+                            planned_episode_count=len(selected) * len(arms),
+                            status="stopped" if stopped else "completed" if len(results) == len(selected) * len(arms) else "running")
+            if manifest["status"] != "running":
+                manifest["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            write_json(args.output / "manifest.json", manifest)
             if results[-1]["vm_cleanup_status"] == "error":
                 raise RuntimeError("VM cleanup failed; stopping before another episode. See the saved result and cleanup.log")
-            terminal = results[-1]
             if terminal.get("error_kind") in {"rate_limit", "routing"} or terminal["status"] in {"interrupted", "cancelled"}:
                 reason = terminal["error_kind"] if terminal.get("error_kind") in {"rate_limit", "routing"} else terminal["status"]
                 write_json(args.output / "dispatch-stop.json", {
