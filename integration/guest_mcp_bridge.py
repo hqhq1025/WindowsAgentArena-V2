@@ -74,19 +74,19 @@ class WindowsJob:
 
 
 class Command:
-    def __init__(self, command, *, env=None):
+    def __init__(self, command, *, env=None, stdin_path=None, output_dir=None):
         self.lock = threading.Lock()
         self.cancelled = False
         self.finished = threading.Event()
-        self.stdout = tempfile.TemporaryFile()
-        self.stderr = tempfile.TemporaryFile()
+        self.stdout = (Path(output_dir) / 'stdout.jsonl').open('x+b') if output_dir else tempfile.TemporaryFile()
+        self.stderr = (Path(output_dir) / 'stderr.log').open('x+b') if output_dir else tempfile.TemporaryFile()
         self.job = None
         # The supervisor cannot launch the command until it belongs to its job.
         # Console creation flags apply to each child, not its descendants.
-        supervisor = "import os,sys,subprocess; gate=sys.stdin.buffer.read(1); sys.exit(subprocess.call(sys.argv[1:],stdin=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0) if gate==b'1' else 125)"
+        supervisor = "import os,sys,subprocess; gate=sys.stdin.buffer.read(1); sys.exit(subprocess.call(sys.argv[2:],stdin=open(sys.argv[1],'rb') if sys.argv[1] else subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0) if gate==b'1' else 125)"
         try:
             self.job = WindowsJob() if os.name == "nt" else None
-            self.process = subprocess.Popen([sys.executable, "-c", supervisor, *command],
+            self.process = subprocess.Popen([sys.executable, "-c", supervisor, str(stdin_path or ''), *command],
                 stdin=subprocess.PIPE, stdout=self.stdout, stderr=self.stderr,
                 start_new_session=os.name != "nt", env=env,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)

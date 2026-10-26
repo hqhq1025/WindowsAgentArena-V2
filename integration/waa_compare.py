@@ -122,6 +122,11 @@ def prepare_env(env, task):
 
 def cleanup_episode(folder, result, command, timeout):
     """Record scoring evidence and clean the owned VM even if evidence writes fail."""
+    if result.get("retain_guest"):
+        result.update(vm_cleanup_status="error", vm_retained=True,
+                      vm_cleanup_error="Guest retained because Codex cleanup or evidence is unverified")
+        write_json(folder / "result.json", result)
+        return
     result["evidence_sealed_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
     result["vm_cleanup_status"] = "pending" if command else "external_owner"
     evidence_errors = []
@@ -306,6 +311,15 @@ def run_episode(args, arm, driver, domain, task, folder):
                 raise RuntimeError("Guest returned no initial screenshot")
             (folder / "initial.png").write_bytes(initial)
         setup_completed = True
+        if getattr(args, "agent_backend", "responses") == "codex":
+            from codex_agent import run_guest_codex
+            phase = "agent"
+            result["status"] = "error"
+            with deadline(args.timeout + 120):
+                result.update(run_guest_codex(args, arm, driver, task, env.controller, folder))
+            if result["status"] not in {"interrupted", "cancelled"}:
+                env.action_history.append("FAIL" if result.get("completion_declaration") == "infeasible" else "DONE")
+            return result
         phase = "driver_start"
         result["status"] = "driver_error"
         bridge = BridgeClient(bridge_url, os.environ["WAA_BRIDGE_TOKEN"])
@@ -386,7 +400,7 @@ def run_episode(args, arm, driver, domain, task, folder):
             # outcomes retain the upstream partial-state score separately.
             if result["status"] in {"interrupted", "cancelled"}:
                 result["evaluator_status"] = "not_run_interrupted"
-            elif result.get("mcp_cleanup_error"):
+            elif result.get("mcp_cleanup_error") or result.get("retain_guest"):
                 result.update(evaluator_status="blocked_cleanup", evaluator_error="Guest process cleanup failed; state may still be changing")
             elif env and setup_completed:
                 phase = "evaluator"
@@ -435,6 +449,9 @@ def main():
     parser.add_argument("--cleanup-command", help="Host cleanup argv JSON; reset hook cleanup_command takes precedence")
     parser.add_argument("--cleanup-timeout", type=float, default=180)
     parser.add_argument("--model", default="gpt-5.5")
+    parser.add_argument("--agent-backend", choices=["responses", "codex"], default="responses")
+    parser.add_argument("--codex-config", type=Path, help="Versioned guest Codex, shell, runtime paths, and instruction bindings")
+    parser.add_argument("--task-root", type=Path, help="Explicit source task directory; does not change the runtime implementation")
     parser.add_argument("--reasoning", default="xhigh")
     parser.add_argument("--gateway-config", type=Path, help="Explicit task-affinity gateway JSON; credentials remain in the environment")
     parser.add_argument("--max-responses", type=int, default=100)
@@ -459,6 +476,16 @@ def main():
         parser.error(str(exc))
     if args.gateway and azure_auth:
         parser.error("Gateway configuration and Azure CLI authentication are mutually exclusive")
+    if args.task_root:
+        global TASKS
+        TASKS = args.task_root.resolve()
+    if args.agent_backend == "codex":
+        from codex_agent import load_codex_config
+        if not args.codex_config or not args.gateway or args.gateway['authentication'] != 'none':
+            parser.error("Codex requires an explicit Codex config and credential-free task-affinity gateway")
+        if args.max_responses != 100 or args.timeout != 1800:
+            parser.error("Codex evaluation requires 100 completed responses and a 1800-second task cap")
+        args.codex = load_codex_config(args.codex_config)
     selected = read_selection(args.task_list)
     arms = ["hcu", "cua"] if args.arm == "both" else [args.arm]
     drivers = json.loads(args.drivers.read_text())
@@ -485,7 +512,9 @@ def main():
             parser.error("cleanup-command must be JSON")
         if not isinstance(cleanup, list) or not cleanup or not all(isinstance(item, str) and item for item in cleanup):
             parser.error("cleanup-command must be a nonempty argv list")
-    manifest = {"run_id": args.run_id, "benchmark": "GAIR-NLP/WindowsAgentArena-V2",
+    manifest = {"run_id": args.run_id, "status": "prepared", "benchmark": "GAIR-NLP/WindowsAgentArena-V2",
+                "agent_backend": args.agent_backend, "codex_config": getattr(args, "codex", None),
+                "task_root": str(TASKS),
                 "baseline_id": args.baseline_id, "task_list": str(args.task_list.resolve()),
                 "selected_task_ids": [task["_selection_id"] for _, task in selected], "task_count": len(selected),
                 "source_task_ids": {task["_selection_id"]: task["id"] for _, task in selected},
@@ -511,10 +540,15 @@ def main():
                 "host_python": sys.version, "host_executable": sys.executable,
                 "host_packages": dict(sorted((d.metadata["Name"], d.version) for d in importlib.metadata.distributions() if d.metadata["Name"])),
                 "created_at": datetime.datetime.now(datetime.timezone.utc).isoformat()}
+    if args.agent_backend == "codex":
+        manifest['model_retry_policy'] = {'codex_request_max_retries': 0, 'codex_stream_max_retries': 0,
+                                         'codex_unbounded_connection_retries': False, 'relay_retries': 0,
+                                         'per_task_request_limit': 400, 'consecutive_failure_limit': 4}
+        manifest['common_execution'] = 'guest Codex native PowerShell'
     if args.dry_run:
         print(json.dumps(manifest, indent=2))
         return
-    required = ["WAA_BRIDGE_TOKEN"] + ([] if args.gateway else ["OPENAI_BASE_URL"])
+    required = ([] if args.agent_backend == "codex" else ["WAA_BRIDGE_TOKEN"]) + ([] if args.gateway else ["OPENAI_BASE_URL"])
     if not azure_auth and not (args.gateway and args.gateway["authentication"] == "none"):
         required.append("OPENAI_API_KEY")
     for name in required:
@@ -524,6 +558,7 @@ def main():
     if args.model_token_provider:
         args.model_token_provider(timeout=20)
     args.output.mkdir(parents=True, exist_ok=False)
+    manifest['status'] = 'running'
     write_json(args.output / "manifest.json", manifest)
     results = []
     for index, (domain, task) in enumerate(selected):
@@ -531,9 +566,18 @@ def main():
         for arm in (arms if index % 2 == 0 else list(reversed(arms))):
             results.append(run_episode(args, arm, drivers[arm], domain, task, args.output / arm / task["_selection_id"]))
             write_json(args.output / "results.json", results)
+            terminal = results[-1]
+            stopped = (terminal["vm_cleanup_status"] == "error" or
+                       terminal.get("error_kind") in {"rate_limit", "routing"} or
+                       terminal["status"] in {"interrupted", "cancelled"})
+            manifest.update(recorded_episode_count=len(results),
+                            planned_episode_count=len(selected) * len(arms),
+                            status="stopped" if stopped else "completed" if len(results) == len(selected) * len(arms) else "running")
+            if manifest["status"] != "running":
+                manifest["finished_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            write_json(args.output / "manifest.json", manifest)
             if results[-1]["vm_cleanup_status"] == "error":
                 raise RuntimeError("VM cleanup failed; stopping before another episode. See the saved result and cleanup.log")
-            terminal = results[-1]
             if terminal.get("error_kind") in {"rate_limit", "routing"} or terminal["status"] in {"interrupted", "cancelled"}:
                 reason = terminal["error_kind"] if terminal.get("error_kind") in {"rate_limit", "routing"} else terminal["status"]
                 write_json(args.output / "dispatch-stop.json", {
