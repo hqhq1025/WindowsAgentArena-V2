@@ -3,7 +3,9 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -14,6 +16,7 @@ from windows_codex_cleanup import JobProcessTracker, classify_processes, _Window
 CODEX = r'C:\runtime\codex'
 DRIVER = r'C:\runtime\driver'
 SHELL = r'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+CONSOLE = r'C:\Windows\System32\conhost.exe'
 
 
 def process(pid, path, parent=None, visible=False, creation=None):
@@ -58,9 +61,23 @@ class ClassificationTests(unittest.TestCase):
                    process(3, r'C:\Apps\child.exe', [2, 500], creation=600)]
         self.assertEqual(self.roles(records)[(3, 600)], 'unknown')
 
+    def test_console_requires_exact_system_path_and_known_parent_identity(self):
+        records = [process(1, CODEX + r'\codex.exe'),
+                   process(2, CONSOLE, [1, 100]), process(3, CONSOLE, [1, 999]),
+                   process(4, r'C:\other\conhost.exe', [1, 100]),
+                   process(5, r'C:\Python\python.exe'), process(6, CONSOLE, [5, 500]),
+                   process(7, r'C:\Apps\editor.exe', visible=True), process(8, CONSOLE, [7, 700])]
+        roles = classify_processes(records, CODEX, DRIVER, [SHELL], CONSOLE, (5, 500))
+        self.assertEqual(roles[(2, 200)], 'console_companion')
+        self.assertEqual(roles[(3, 300)], 'unknown')
+        self.assertEqual(roles[(4, 400)], 'unknown')
+        self.assertEqual(roles[(6, 600)], 'console_companion')
+        self.assertEqual(roles[(8, 800)], 'task_application')
+
 
 class FakeWindows:
     def __init__(self):
+        self.console_path = CONSOLE
         self.live = {1: dict(path=CODEX + r'\codex.exe', creation_time=100),
                      2: dict(path=SHELL, creation_time=200),
                      3: dict(path=r'C:\Apps\editor.exe', creation_time=300),
@@ -89,6 +106,11 @@ class FakeWindows:
     def wait_supervisor(self, _job, record):
         self.live.pop(record['pid'], None)
         return 'supervisor_exited'
+
+    def wait_companion(self, _job, record, timeout_ms):
+        assert 0 <= timeout_ms <= 3000
+        self.live.pop(record['pid'], None)
+        return 'console_companion_exited'
 
 
 class TrackerTests(unittest.TestCase):
@@ -190,6 +212,30 @@ class TrackerTests(unittest.TestCase):
         self.assertFalse(state['verified'])
         self.assertEqual(state['departed_during_snapshot'], [])
 
+    def test_console_waits_after_parent_cleanup_without_termination(self):
+        self.api.live[6] = dict(path=CONSOLE, creation_time=600)
+        self.api.parent_map[6] = 1
+        result = self.tracker.finish()
+        self.assertEqual(result['status'], 'agent_runtime_stopped_with_task_apps_retained')
+        self.assertEqual(self.api.killed, [1, 2])
+        self.assertEqual(result['console_waits'][0]['outcome'], 'console_companion_exited')
+
+    def test_console_with_unknown_parent_is_retained(self):
+        self.api.live[6] = dict(path=CONSOLE, creation_time=600)
+        self.api.parent_map[6] = 999
+        result = self.tracker.finish()
+        self.assertEqual(result['status'], 'unverified')
+        self.assertEqual(result['console_waits'], [])
+        self.assertNotIn(6, self.api.killed)
+
+    def test_console_wait_timeout_is_unverified(self):
+        self.api.live[6] = dict(path=CONSOLE, creation_time=600)
+        self.api.parent_map[6] = 1
+        self.api.wait_companion = lambda *_args: 'console_companion_wait_timeout'
+        result = self.tracker.finish()
+        self.assertEqual(result['status'], 'unverified')
+        self.assertNotIn(6, self.api.killed)
+
 
 class TerminationGuardTests(unittest.TestCase):
     def test_reused_pid_foreign_job_and_new_visible_window_are_not_killed(self):
@@ -270,7 +316,14 @@ time.sleep(60)
                                         supervisor_pid=child.pid if supervisor else None)
             before = tracker.snapshot()
             self.assertTrue(before['verified'], before)
-            self.assertEqual({p['pid'] for p in before['processes']}, {child.pid})
+            helper_record = next(p for p in before['processes'] if p['pid'] == child.pid)
+            for extra in before['processes']:
+                if extra['pid'] == child.pid:
+                    continue
+                self.assertEqual(os.path.normcase(extra['path']), api.console_path, extra)
+                self.assertEqual(extra['parent_identity'], [child.pid, helper_record['creation_time']], extra)
+                self.assertEqual(extra['role'], 'task_application' if visible else
+                                 'console_companion' if recognized or supervisor else 'unknown', extra)
             if supervisor:
                 child.stdin.write('1')
                 child.stdin.close()
@@ -309,6 +362,41 @@ time.sleep(60)
 
     def test_real_supervisor_natural_exit(self):
         self.helper(False, supervisor=True)
+
+    def test_real_command_timeout_cleanup_preserves_supervisor_until_child_stops(self):
+        from guest_mcp_bridge import Command
+        command = None
+        with tempfile.TemporaryDirectory() as directory:
+            ready = Path(directory) / 'child-ready'
+            script = f"import pathlib,time; pathlib.Path({str(ready)!r}).touch(); time.sleep(60)"
+            try:
+                command = Command([sys.executable, '-c', script])
+                tracker = JobProcessTracker(command.job.handle, str(Path(sys.executable).parent),
+                                            DRIVER, [SHELL], supervisor_pid=command.process.pid)
+                deadline = time.monotonic() + 5
+                while not ready.exists() and time.monotonic() < deadline:
+                    tracker.snapshot()
+                    time.sleep(0.02)
+                self.assertTrue(ready.exists(), 'Substitute Codex runtime did not become ready')
+                before = tracker.snapshot()
+                self.assertTrue(before['verified'], before)
+                self.assertTrue(any(p['role'] == 'agent_runtime' for p in before['processes']), before)
+                # Production timeout handling polls the supervisor directly;
+                # Command.wait/cancel would terminate task GUI through the Job.
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    command.process.wait(timeout=0.05)
+                result = tracker.finish()
+                self.assertEqual(result['status'], 'agent_runtime_stopped', result)
+                self.assertNotIn(command.process.pid, [a['pid'] for a in result['actions']])
+                self.assertFalse(any(p['role'] == 'unknown' for p in result['processes']), result)
+                command.process.wait(timeout=5)
+            finally:
+                if command is not None:
+                    # This test Job contains only our synthetic processes, no task GUI.
+                    # Always reclaim helpers even when an assertion fails.
+                    if command.job:
+                        command.job.terminate()
+                    command.dispose()
 
 
 if __name__ == '__main__':

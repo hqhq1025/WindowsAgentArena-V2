@@ -20,10 +20,12 @@ def _under(path, root):
     return bool(root) and path.startswith(root.rstrip('\\') + '\\')
 
 
-def classify_processes(records, codex_runtime_root, driver_runtime_root, shell_paths):
+def classify_processes(records, codex_runtime_root, driver_runtime_root, shell_paths,
+                       console_path=None, supervisor_identity=None):
     """Return roles keyed by (PID, creation FILETIME), without using image names."""
     roots = [_path(codex_runtime_root), _path(driver_runtime_root)]
     shells = {_path(path) for path in shell_paths}
+    console_path = _path(console_path)
     by_id = {(p['pid'], p['creation_time']): p for p in records}
     protected = {key for key, p in by_id.items() if p.get('visible')}
     # Keep historical GUI ancestry, including children whose GUI parent exited.
@@ -39,6 +41,11 @@ def classify_processes(records, codex_runtime_root, driver_runtime_root, shell_p
         runtime = any(_under(_path(p.get('path')), root) for root in roots)
         roles[key] = ('protected_runtime' if runtime else 'task_application') if key in protected else (
             'agent_runtime' if runtime else 'unknown')
+        if key == supervisor_identity:
+            roles[key] = 'protected_runtime' if key in protected else 'agent_supervisor'
+        elif key not in protected and console_path and _path(p.get('path')) == console_path:
+            # Even an overly broad runtime root cannot authorize killing conhost.
+            roles[key] = 'unknown'
     changed = True
     while changed:
         changed = False
@@ -46,7 +53,11 @@ def classify_processes(records, codex_runtime_root, driver_runtime_root, shell_p
             parent_role = roles.get(tuple(p.get('parent_identity') or ()))
             if roles[key] != 'unknown':
                 continue
-            if parent_role == 'agent_command' or (
+            if console_path and _path(p.get('path')) == console_path:
+                if parent_role in {'agent_runtime', 'agent_command', 'agent_supervisor'}:
+                    roles[key] = 'console_companion'
+                    changed = True
+            elif parent_role == 'agent_command' or (
                 parent_role == 'agent_runtime' and _path(p.get('path')) in shells
             ):
                 roles[key] = 'agent_command'
@@ -76,9 +87,15 @@ class _Windows:
             'IsProcessInJob': ([wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL)], wintypes.BOOL),
             'TerminateProcess': ([wintypes.HANDLE, wintypes.UINT], wintypes.BOOL),
             'WaitForSingleObject': ([wintypes.HANDLE, wintypes.DWORD], wintypes.DWORD),
+            'GetSystemWindowsDirectoryW': ([wintypes.LPWSTR, wintypes.UINT], wintypes.UINT),
         }
         for name, (args, result) in signatures.items():
             getattr(K, name).argtypes, getattr(K, name).restype = args, result
+        directory = ctypes.create_unicode_buffer(32768)
+        length = self._check(K.GetSystemWindowsDirectoryW(directory, len(directory)))
+        if length >= len(directory):
+            raise RuntimeError('System Windows directory exceeds buffer')
+        self.console_path = _path(ntpath.join(directory.value, 'System32', 'conhost.exe'))
         self.callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
         self.user.EnumWindows.argtypes = [self.callback_type, wintypes.LPARAM]
         self.user.EnumWindows.restype = wintypes.BOOL
@@ -184,27 +201,33 @@ class _Windows:
             self.kernel.CloseHandle(handle)
 
     def wait_supervisor(self, job, record):
-        """Wait on an exact supervisor identity; never request termination rights."""
+        return self._wait_owned(job, record, 3000, 'supervisor')
+
+    def wait_companion(self, job, record, timeout_ms):
+        return self._wait_owned(job, record, timeout_ms, 'console_companion')
+
+    def _wait_owned(self, job, record, timeout_ms, role):
+        """Wait on an exact process identity; never request termination rights."""
         if record['pid'] not in self.pids(job):
-            return 'supervisor_not_in_job'
+            return role + '_not_in_job'
         handle = self.kernel.OpenProcess(0x1000 | 0x00100000, False, record['pid'])
         if not handle:
             error = ctypes.get_last_error()
             if record['pid'] not in self.pids(job):
-                return 'supervisor_not_in_job'
+                return role + '_not_in_job'
             raise ctypes.WinError(error)
         try:
             current = self._identity(handle)
             if current['creation_time'] != record['creation_time'] or _path(current['path']) != _path(record['path']):
-                return 'supervisor_identity_changed'
+                return role + '_identity_changed'
             member = wintypes.BOOL()
             self._check(self.kernel.IsProcessInJob(handle, job, ctypes.byref(member)))
             if not member.value:
-                return 'supervisor_not_in_job'
-            waited = self.kernel.WaitForSingleObject(handle, 3000)
+                return role + '_not_in_job'
+            waited = self.kernel.WaitForSingleObject(handle, timeout_ms)
             if waited == 0xFFFFFFFF:
                 raise ctypes.WinError(ctypes.get_last_error())
-            return 'supervisor_exited' if waited == 0 else 'supervisor_wait_timeout'
+            return role + '_exited' if waited == 0 else role + '_wait_timeout'
         finally:
             self.kernel.CloseHandle(handle)
 
@@ -273,13 +296,11 @@ class JobProcessTracker:
                 if len(candidates) == 1:
                     entry['parent_identity'] = [candidates[0]['pid'], candidates[0]['creation_time']]
             roles = classify_processes(self._records.values(), self.codex_runtime_root,
-                                       self.driver_runtime_root, self.shell_paths)
+                                       self.driver_runtime_root, self.shell_paths, self._api.console_path,
+                                       (self._supervisor['pid'], self._supervisor['creation_time'])
+                                       if self._supervisor else None)
             for key, entry in self._records.items():
                 entry['role'] = roles[key]
-                if self._supervisor and key == (self._supervisor['pid'], self._supervisor['creation_time']):
-                    # A supervisor outside runtime roots is authorized only to be
-                    # observed and waited on, never killed as a generic Python.
-                    entry['role'] = 'protected_runtime' if entry['visible'] else 'agent_supervisor'
             return {'verified': not errors, 'errors': errors, 'snapshot': self._snapshot_number,
                     'departed_during_snapshot': departed,
                     'processes': [dict(entry) for entry in current.values()]}
@@ -323,6 +344,21 @@ class JobProcessTracker:
                 except Exception as error:
                     supervisor['wait_outcome'] = 'error'
                     errors.append(f"Supervisor PID {supervisor['pid']}: {error}")
+            console_waits = []
+            companions = self.snapshot()
+            errors.extend(companions['errors'])
+            deadline = time.monotonic() + 3
+            for companion in companions['processes']:
+                if companion['role'] != 'console_companion':
+                    continue
+                try:
+                    outcome = self._api.wait_companion(self.job_handle, companion,
+                                                       max(0, int((deadline - time.monotonic()) * 1000)))
+                except Exception as error:
+                    outcome = 'error'
+                    errors.append(f"Console PID {companion['pid']}: {error}")
+                console_waits.append({'pid': companion['pid'], 'creation_time': companion['creation_time'],
+                                      'outcome': outcome})
             final = self.snapshot()
             errors.extend(final['errors'])
             retained = final['processes']
@@ -330,4 +366,5 @@ class JobProcessTracker:
             return {'status': ('agent_runtime_stopped_with_task_apps_retained' if retained else 'agent_runtime_stopped')
                     if verified else 'unverified', 'retain_guest': not verified,
                     'processes': [dict(p) for p in self._records.values()], 'remaining': retained,
-                    'supervisor': supervisor, 'actions': actions, 'errors': errors, 'snapshots': self._snapshot_number}
+                    'supervisor': supervisor, 'console_waits': console_waits,
+                    'actions': actions, 'errors': errors, 'snapshots': self._snapshot_number}
